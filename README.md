@@ -20,9 +20,12 @@
 </p>
 
 > [!NOTE]
-> This project is **vibe coded** — it was built iteratively by prompting AI, and this
+> This project is **vibe coded** — it was built iteratively by prompting **DeepSeek V4 Flash** agent, and this
 > README was written by **DeepSeek V4 Flash**. Expect pragmatic, working software
 > rather than a hand-crafted, artisanal codebase.
+>
+> The original [`plan.md`](plan.md) — the initial design and implementation plan — was
+> discussed and prepared with **GPT-5.6** in a chat on the [ChatGPT website](https://chatgpt.com/).
 
 ---
 
