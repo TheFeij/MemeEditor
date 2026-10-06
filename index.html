@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Meme Editor</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <div id="app">
+        <header class="topbar">
+            <div class="brand">
+                <span class="brand-mark">ME</span>
+                <span class="brand-name">Meme Editor</span>
+            </div>
+            <div class="topbar-actions">
+                <button id="btn-undo" class="btn btn-icon" type="button" title="Undo (Ctrl+Z)" disabled>↶</button>
+                <button id="btn-redo" class="btn btn-icon" type="button" title="Redo (Ctrl+Shift+Z)" disabled>↷</button>
+                <button id="btn-open" class="btn" type="button">Open Image</button>
+                <button id="btn-replace" class="btn" type="button" disabled>Replace Image</button>
+                <button id="btn-save" class="btn btn-primary" type="button">Save Image</button>
+            </div>
+        </header>
+
+        <main class="layout">
+            <aside class="toolbar">
+                <section class="tool-section">
+                    <h3 class="section-title">Tools</h3>
+                    <div class="tool-grid" id="tools">
+                        <button class="tool" data-tool="select" type="button" title="Select (V)">
+                            <span class="tool-icon">▲</span><span class="tool-label">Select</span>
+                        </button>
+                        <button class="tool" data-tool="text" type="button" title="Text (T)">
+                            <span class="tool-icon">T</span><span class="tool-label">Text</span>
+                        </button>
+                        <button class="tool" data-tool="image" type="button" title="Add logo / image">
+                            <span class="tool-icon">▣</span><span class="tool-label">Image</span>
+                        </button>
+                        <button class="tool" data-tool="rect" type="button" title="Rectangle (R)">
+                            <span class="tool-icon">▭</span><span class="tool-label">Rect</span>
+                        </button>
+                        <button class="tool" data-tool="ellipse" type="button" title="Ellipse (E)">
+                            <span class="tool-icon">◯</span><span class="tool-label">Ellipse</span>
+                        </button>
+                        <button class="tool" data-tool="brush" type="button" title="Brush (B)">
+                            <span class="tool-icon">✎</span><span class="tool-label">Brush</span>
+                        </button>
+                        <button class="tool" data-tool="eyedropper" type="button" title="Eyedropper (I)">
+                            <span class="tool-icon">⌖</span><span class="tool-label">Pick</span>
+                        </button>
+                    </div>
+                </section>
+
+                <section class="tool-section">
+                    <h3 class="section-title">Brush</h3>
+                    <div class="field">
+                        <label>Mode</label>
+                        <select id="brush-mode">
+                            <option value="draw">Draw</option>
+                            <option value="cover">Cover / Remove</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label>Color</label>
+                        <input type="color" id="brush-color" value="#000000" />
+                    </div>
+                    <div class="field">
+                        <label>Size <span id="brush-size-value">10</span></label>
+                        <input type="range" id="brush-size" min="1" max="120" value="10" />
+                    </div>
+                    <button id="btn-cover-bg" class="btn btn-ghost btn-sm" type="button">Use background color</button>
+                </section>
+
+                <section class="tool-section">
+                    <h3 class="section-title">Padding</h3>
+                    <div class="row gap">
+                        <button id="preset-classic" class="btn btn-sm" type="button">Classic</button>
+                        <button id="preset-modern" class="btn btn-sm" type="button">Modern</button>
+                    </div>
+                    <div class="pad-grid">
+                        <label>Top <input type="number" id="pad-top" min="0" max="200" step="1" value="0" /></label>
+                        <label>Right <input type="number" id="pad-right" min="0" max="200" step="1" value="0" /></label>
+                        <label>Bottom <input type="number" id="pad-bottom" min="0" max="200" step="1" value="0" /></label>
+                        <label>Left <input type="number" id="pad-left" min="0" max="200" step="1" value="0" /></label>
+                    </div>
+                    <p class="hint">Values are percentages of the image size.</p>
+                </section>
+
+                <section class="tool-section">
+                    <h3 class="section-title">Background</h3>
+                    <div class="row gap">
+                        <button id="bg-white" class="btn btn-sm swatch-btn" type="button" title="White">
+                            <span class="swatch" style="background:#ffffff"></span> White
+                        </button>
+                        <button id="bg-black" class="btn btn-sm swatch-btn" type="button" title="Black">
+                            <span class="swatch" style="background:#000000"></span> Black
+                        </button>
+                    </div>
+                    <div class="field">
+                        <label>Custom</label>
+                        <input type="color" id="bg-color" value="#ffffff" />
+                    </div>
+                </section>
+            </aside>
+
+            <section class="stage" id="stage">
+                <canvas id="canvas" width="800" height="600"></canvas>
+                <div class="empty-state" id="empty-state">
+                    <div class="empty-inner">
+                        <div class="empty-icon">🖼️</div>
+                        <h2>Drop an image here</h2>
+                        <p>or paste from clipboard, or <button id="empty-open" class="link-btn" type="button">open a file</button>.</p>
+                    </div>
+                </div>
+                <div class="drop-overlay" id="drop-overlay">
+                    <div class="drop-inner">Drop image to add</div>
+                </div>
+                <div class="zoom-controls" id="zoom-controls">
+                    <button id="zoom-out" class="zoom-btn" type="button" title="Zoom out">−</button>
+                    <span id="zoom-label" class="zoom-label">100%</span>
+                    <button id="zoom-in" class="zoom-btn" type="button" title="Zoom in">+</button>
+                    <button id="zoom-fit" class="zoom-btn zoom-fit" type="button" title="Fit to screen">Fit</button>
+                </div>
+            </section>
+
+            <aside class="properties" id="properties">
+                <section class="prop-section" id="prop-empty">
+                    <h3 class="section-title">Properties</h3>
+                    <p class="muted">Nothing selected.</p>
+                </section>
+
+                <section class="prop-section hidden" id="prop-text">
+                    <h3 class="section-title">Text</h3>
+                    <div class="field">
+                        <label>Content</label>
+                        <textarea id="text-content" rows="3" placeholder="Type text..."></textarea>
+                    </div>
+                    <div class="field">
+                        <label>Font</label>
+                        <select id="text-font">
+                            <option value="Zain Bold">Zain Bold</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label>Size <span id="text-size-value">48</span></label>
+                        <input type="range" id="text-size" min="8" max="400" value="48" />
+                    </div>
+                    <label class="check">
+                        <input type="checkbox" id="text-autofit" /> Auto-fit to width
+                    </label>
+                    <div class="field">
+                        <label>Max size</label>
+                        <input type="number" id="text-maxsize" min="8" max="400" value="24" />
+                    </div>
+                    <div class="field">
+                        <label>Alignment</label>
+                        <div class="seg" id="text-align">
+                            <button type="button" data-align="left">Left</button>
+                            <button type="button" data-align="center">Center</button>
+                            <button type="button" data-align="right">Right</button>
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label>Text color</label>
+                        <input type="color" id="text-color" value="#ffffff" />
+                    </div>
+                    <label class="check">
+                        <input type="checkbox" id="text-outline-enabled" /> Outline
+                    </label>
+                    <div class="field">
+                        <label>Outline color</label>
+                        <input type="color" id="text-outline-color" value="#000000" />
+                    </div>
+                    <div class="field">
+                        <label>Outline width <span id="text-outline-value">4</span></label>
+                        <input type="range" id="text-outline-width" min="0" max="40" value="4" />
+                    </div>
+
+                    <div class="presets">
+                        <h4>Text presets</h4>
+                        <select id="preset-select"></select>
+                        <div class="row gap">
+                            <button id="preset-apply" class="btn btn-sm" type="button">Apply</button>
+                            <button id="preset-delete" class="btn btn-sm btn-ghost" type="button">Delete</button>
+                        </div>
+                        <div class="row gap">
+                            <input type="text" id="preset-name" placeholder="Preset name" />
+                            <button id="preset-save" class="btn btn-sm" type="button">Save current</button>
+                        </div>
+                        <button id="preset-rename" class="btn btn-sm btn-ghost" type="button">Rename selected</button>
+                    </div>
+                </section>
+
+                <section class="prop-section hidden" id="prop-image">
+                    <h3 class="section-title">Image layer</h3>
+                    <div class="field">
+                        <label>Opacity <span id="image-opacity-value">100</span>%</label>
+                        <input type="range" id="image-opacity" min="0" max="100" value="100" />
+                    </div>
+                    <div class="pad-grid">
+                        <label>Width <input type="number" id="image-width" min="1" /></label>
+                        <label>Height <input type="number" id="image-height" min="1" /></label>
+                    </div>
+                </section>
+
+                <section class="prop-section hidden" id="prop-shape">
+                    <h3 class="section-title">Shape</h3>
+                    <div class="field">
+                        <label>Fill</label>
+                        <input type="color" id="shape-fill" value="#ff0000" />
+                    </div>
+                    <div class="field hidden" id="shape-radius-field">
+                        <label>Corner radius <span id="shape-radius-value">12</span></label>
+                        <input type="range" id="shape-radius" min="0" max="200" value="12" />
+                    </div>
+                </section>
+
+                <section class="prop-section hidden" id="prop-order">
+                    <h3 class="section-title">Arrange</h3>
+                    <div class="row gap">
+                        <button id="order-forward" class="btn btn-sm" type="button">Bring forward</button>
+                        <button id="order-backward" class="btn btn-sm" type="button">Send backward</button>
+                    </div>
+                    <button id="btn-delete" class="btn btn-sm btn-danger" type="button">Delete selected</button>
+                </section>
+            </aside>
+        </main>
+    </div>
+
+    <div id="toasts" class="toasts"></div>
+    <input type="file" id="file-input" accept="image/*" hidden />
+    <input type="file" id="layer-input" accept="image/*" hidden />
+    <input type="file" id="replace-input" accept="image/*" hidden />
+
+    <script src="app.js"></script>
+</body>
+</html>
