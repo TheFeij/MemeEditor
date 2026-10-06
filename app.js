@@ -24,6 +24,7 @@
         brush: "crosshair",
         rect: "crosshair",
         ellipse: "crosshair",
+        crop: "crosshair",
         eyedropper: "crosshair"
     };
 
@@ -59,6 +60,13 @@
     let historyIndex = -1;
     let interaction = null;
     let rafPending = false;
+
+    // Crop tool rectangle (document coordinates). View-only until applied.
+    let crop = null;
+
+    // Active alignment guides shown while placing text/objects.
+    // { allV, allH, v, h } where v/h are the snapped (highlighted) lines.
+    let guideState = null;
 
     // View-only (not part of the document): render supersampling and zoom.
     let renderScale = 1;
@@ -103,7 +111,12 @@
     const propText = $("prop-text");
     const propImage = $("prop-image");
     const propShape = $("prop-shape");
+    const propCrop = $("prop-crop");
     const propOrder = $("prop-order");
+
+    const cropApply = $("crop-apply");
+    const cropCancel = $("crop-cancel");
+    const cropSize = $("crop-size");
 
     const textContent = $("text-content");
     const textFont = $("text-font");
@@ -236,6 +249,100 @@
             x: (event.clientX - rect.left) * scaleX,
             y: (event.clientY - rect.top) * scaleY
         };
+    }
+
+    // Rectangle the base image occupies in document coordinates. The base image
+    // is always drawn at its native resolution (1 document unit = 1 pixel).
+    function getImageRect() {
+        const size = computeDocumentSize();
+        const img = state.baseImage;
+        return { x: size.left, y: size.top, width: img.width, height: img.height };
+    }
+
+    function clampCropRect(a, b) {
+        const img = getImageRect();
+        const x1 = clamp(Math.min(a.x, b.x), img.x, img.x + img.width);
+        const y1 = clamp(Math.min(a.y, b.y), img.y, img.y + img.height);
+        const x2 = clamp(Math.max(a.x, b.x), img.x, img.x + img.width);
+        const y2 = clamp(Math.max(a.y, b.y), img.y, img.y + img.height);
+        return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+    }
+
+    function shiftObjects(dx, dy) {
+        if (!dx && !dy) return;
+        for (const o of state.objects) {
+            o.x = (o.x || 0) + dx;
+            o.y = (o.y || 0) + dy;
+            if (o.points) {
+                for (const pt of o.points) {
+                    pt.x += dx;
+                    pt.y += dy;
+                }
+            }
+        }
+    }
+
+    // Guide lines: the start, middle and end of the base image on both axes.
+    function getGuideLines() {
+        const img = getImageRect();
+        if (!img.width || !img.height) return { xs: [], ys: [] };
+        return {
+            xs: [img.x, img.x + img.width / 2, img.x + img.width],
+            ys: [img.y, img.y + img.height / 2, img.y + img.height]
+        };
+    }
+
+    // Find the nearest guide alignment for an object placed at (nx, ny) and
+    // return the snapped position plus the guide lines to highlight.
+    function computeSnappedPosition(obj, nx, ny) {
+        const guides = getGuideLines();
+        if (!guides.xs.length) return { x: nx, y: ny, v: [], h: [], allV: [], allH: [] };
+
+        const oldX = obj.x;
+        const oldY = obj.y;
+        obj.x = nx;
+        obj.y = ny;
+        const b = getObjectBounds(obj);
+        obj.x = oldX;
+        obj.y = oldY;
+
+        const threshold = 7 / (displayScale > 0 ? displayScale : 1);
+        const vCandidates = [b.x, b.x + b.width / 2, b.x + b.width];
+        const hCandidates = [b.y, b.y + b.height / 2, b.y + b.height];
+
+        let bestV = null;
+        let bestVd = Infinity;
+        for (const gx of guides.xs) {
+            for (const c of vCandidates) {
+                const d = Math.abs(gx - c);
+                if (d <= threshold && d < bestVd) {
+                    bestVd = d;
+                    bestV = { guide: gx, delta: gx - c };
+                }
+            }
+        }
+        let bestH = null;
+        let bestHd = Infinity;
+        for (const gy of guides.ys) {
+            for (const c of hCandidates) {
+                const d = Math.abs(gy - c);
+                if (d <= threshold && d < bestHd) {
+                    bestHd = d;
+                    bestH = { guide: gy, delta: gy - c };
+                }
+            }
+        }
+
+        const result = { x: nx, y: ny, v: [], h: [], allV: guides.xs, allH: guides.ys };
+        if (bestV) {
+            result.x = nx + bestV.delta;
+            result.v.push(bestV.guide);
+        }
+        if (bestH) {
+            result.y = ny + bestH.delta;
+            result.h.push(bestH.guide);
+        }
+        return result;
     }
 
     // ---------------------------------------------------------------------
@@ -544,6 +651,90 @@
         ctx.restore();
     }
 
+    function updateSelectionGuides() {
+        if (interaction) return;
+        const obj = getSelectedObject();
+        if (obj && obj.type === "text" && state.activeTool === "select") {
+            const g = getGuideLines();
+            guideState = { allV: g.xs, allH: g.ys, v: [], h: [] };
+        } else {
+            guideState = null;
+        }
+    }
+
+    // Editor-only alignment guides. Faint lines show the image start, middle
+    // and end; bright lines mark a snap that is currently active.
+    function drawGuides(ctx) {
+        if (!guideState) return;
+        const size = computeDocumentSize();
+        const u = 1 / (displayScale > 0 ? displayScale : 1);
+        ctx.save();
+        ctx.strokeStyle = "rgba(108, 140, 255, 0.5)";
+        ctx.lineWidth = 1 * u;
+        ctx.setLineDash([7 * u, 5 * u]);
+        ctx.beginPath();
+        for (const x of guideState.allV) {
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, size.height);
+        }
+        for (const y of guideState.allH) {
+            ctx.moveTo(0, y);
+            ctx.lineTo(size.width, y);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.strokeStyle = "#4f74ff";
+        ctx.lineWidth = 1.8 * u;
+        ctx.beginPath();
+        for (const x of guideState.v) {
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, size.height);
+        }
+        for (const y of guideState.h) {
+            ctx.moveTo(0, y);
+            ctx.lineTo(size.width, y);
+        }
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    // Editor-only crop overlay. Dims everything outside the crop rectangle and
+    // draws a rule-of-thirds grid inside it.
+    function drawCropOverlay(ctx) {
+        if (state.activeTool !== "crop" || !state.baseImage.source) return;
+        const size = computeDocumentSize();
+        const u = 1 / (displayScale > 0 ? displayScale : 1);
+        ctx.save();
+        ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+        if (!crop) {
+            ctx.fillRect(0, 0, size.width, size.height);
+        } else {
+            const c = crop;
+            ctx.fillRect(0, 0, size.width, c.y);
+            ctx.fillRect(0, c.y, c.x, c.height);
+            ctx.fillRect(c.x + c.width, c.y, size.width - (c.x + c.width), c.height);
+            ctx.fillRect(0, c.y + c.height, size.width, size.height - (c.y + c.height));
+
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+            ctx.lineWidth = 1 * u;
+            ctx.beginPath();
+            for (let i = 1; i < 3; i++) {
+                const gx = c.x + (c.width * i) / 3;
+                ctx.moveTo(gx, c.y);
+                ctx.lineTo(gx, c.y + c.height);
+                const gy = c.y + (c.height * i) / 3;
+                ctx.moveTo(c.x, gy);
+                ctx.lineTo(c.x + c.width, gy);
+            }
+            ctx.stroke();
+
+            ctx.strokeStyle = "#4f74ff";
+            ctx.lineWidth = 1.5 * u;
+            ctx.strokeRect(c.x, c.y, c.width, c.height);
+        }
+        ctx.restore();
+    }
+
     function getRenderScale(size) {
         const longSide = Math.max(size.width, size.height);
         if (longSide <= 0) return 1;
@@ -579,6 +770,9 @@
         const ctx = getCtx();
         ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
         renderDocument(ctx);
+        updateSelectionGuides();
+        drawGuides(ctx);
+        drawCropOverlay(ctx);
         drawSelection(ctx);
 
         updateEmptyState();
@@ -769,11 +963,21 @@
     // ---------------------------------------------------------------------
 
     function setActiveTool(tool) {
+        if (tool === "crop" && !state.baseImage.source) {
+            toast("Open an image before cropping", "error");
+            return;
+        }
+        if (tool !== "crop") crop = null;
+        if (tool === "crop") {
+            state.selectedObjectId = null;
+            guideState = null;
+        }
         state.activeTool = tool;
         canvas.style.cursor = CURSORS[tool] || "default";
         document.querySelectorAll(".tool").forEach((btn) => {
             btn.classList.toggle("active", btn.dataset.tool === tool);
         });
+        syncUI();
     }
 
     function syncUI() {
@@ -782,11 +986,19 @@
         });
 
         const obj = getSelectedObject();
-        propEmpty.classList.toggle("hidden", !!obj);
+        const cropping = state.activeTool === "crop" && !!state.baseImage.source;
+        propEmpty.classList.toggle("hidden", !!obj || cropping);
         propText.classList.toggle("hidden", !(obj && obj.type === "text"));
         propImage.classList.toggle("hidden", !(obj && obj.type === "image"));
         propShape.classList.toggle("hidden", !(obj && (obj.type === "rect" || obj.type === "ellipse")));
-        propOrder.classList.toggle("hidden", !obj);
+        propCrop.classList.toggle("hidden", !cropping);
+        propOrder.classList.toggle("hidden", !obj || cropping);
+
+        const cropReady = !!crop && crop.width >= 2 && crop.height >= 2;
+        cropApply.disabled = !cropReady;
+        cropSize.textContent = cropReady
+            ? Math.round(crop.width) + " × " + Math.round(crop.height) + " px"
+            : "";
 
         if (obj && obj.type === "text") {
             textContent.value = obj.text;
@@ -838,6 +1050,7 @@
         if (event.button !== 0) return;
         const p = getDocPoint(event);
         const tool = state.activeTool;
+        guideState = null;
 
         if (tool === "eyedropper") {
             sampleColorAt(p);
@@ -848,6 +1061,23 @@
             canvas.setPointerCapture(event.pointerId);
         } catch (err) {
             /* pointer capture is best-effort */
+        }
+
+        if (tool === "crop") {
+            const img = getImageRect();
+            if (
+                p.x < img.x ||
+                p.x > img.x + img.width ||
+                p.y < img.y ||
+                p.y > img.y + img.height
+            ) {
+                return;
+            }
+            crop = { x: p.x, y: p.y, width: 0, height: 0 };
+            interaction = { kind: "crop", start: p };
+            render();
+            syncUI();
+            return;
         }
 
         if (tool === "brush") {
@@ -1014,6 +1244,12 @@
             return;
         }
 
+        if (interaction.kind === "crop") {
+            crop = clampCropRect(interaction.start, p);
+            requestRender();
+            return;
+        }
+
         if (interaction.kind === "create") {
             const o = interaction.object;
             const s = interaction.start;
@@ -1027,8 +1263,10 @@
 
         if (interaction.kind === "drag") {
             const o = interaction.object;
-            o.x = p.x - interaction.dx;
-            o.y = p.y - interaction.dy;
+            const snap = computeSnappedPosition(o, p.x - interaction.dx, p.y - interaction.dy);
+            o.x = snap.x;
+            o.y = snap.y;
+            guideState = { allV: snap.allV, allH: snap.allH, v: snap.v, h: snap.h };
             interaction.moved = true;
             requestRender();
             return;
@@ -1047,6 +1285,8 @@
 
         if (kind === "brush") {
             commit();
+        } else if (kind === "crop") {
+            if (!crop || crop.width < 2 || crop.height < 2) crop = null;
         } else if (kind === "create") {
             const o = interaction.object;
             if (o.width < 2 || o.height < 2) {
@@ -1294,6 +1534,49 @@
             commit();
             render();
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Crop
+    // ---------------------------------------------------------------------
+
+    function applyCrop() {
+        const img = state.baseImage;
+        if (!img.source || !crop || crop.width < 2 || crop.height < 2) {
+            toast("Select a crop area first", "error");
+            return;
+        }
+        const rect = getImageRect();
+        const ix = clamp(Math.round(crop.x - rect.x), 0, img.width - 1);
+        const iy = clamp(Math.round(crop.y - rect.y), 0, img.height - 1);
+        const cw = clamp(Math.round(crop.width), 1, img.width - ix);
+        const ch = clamp(Math.round(crop.height), 1, img.height - iy);
+
+        const off = document.createElement("canvas");
+        off.width = cw;
+        off.height = ch;
+        off.getContext("2d").drawImage(img.source, ix, iy, cw, ch, 0, 0, cw, ch);
+
+        // Keep overlays aligned with the image content they were placed on.
+        const oldSize = computeDocumentSize();
+        state.baseImage = { source: off, width: cw, height: ch };
+        const newSize = computeDocumentSize();
+        shiftObjects(newSize.left - oldSize.left - ix, newSize.top - oldSize.top - iy);
+
+        crop = null;
+        state.selectedObjectId = null;
+        setActiveTool("select");
+        commit();
+        render();
+        syncUI();
+        toast("Cropped to " + cw + " × " + ch);
+    }
+
+    function cancelCrop() {
+        crop = null;
+        setActiveTool("select");
+        render();
+        syncUI();
     }
 
     // ---------------------------------------------------------------------
@@ -1552,6 +1835,10 @@
         orderBackward.addEventListener("click", sendBackward);
         btnDelete.addEventListener("click", deleteSelectedObject);
 
+        // Crop
+        cropApply.addEventListener("click", applyCrop);
+        cropCancel.addEventListener("click", cancelCrop);
+
         // File inputs
         btnOpen.addEventListener("click", () => fileInput.click());
         emptyOpen.addEventListener("click", () => fileInput.click());
@@ -1627,6 +1914,11 @@
             }
             if (mod) return;
 
+            if (key === "escape") {
+                if (state.activeTool === "crop") cancelCrop();
+                return;
+            }
+
             switch (key) {
                 case "v":
                     setActiveTool("select");
@@ -1642,6 +1934,9 @@
                     break;
                 case "e":
                     setActiveTool("ellipse");
+                    break;
+                case "c":
+                    setActiveTool("crop");
                     break;
                 case "i":
                     setActiveTool("eyedropper");
