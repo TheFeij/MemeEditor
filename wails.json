@@ -1,0 +1,15 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "MemeEditor",
+  "outputfilename": "MemeEditor",
+  "frontend:install": "",
+  "frontend:build": "",
+  "author": {
+    "name": "TheFeij"
+  },
+  "info": {
+    "productName": "Meme Editor",
+    "productVersion": "1.0.0",
+    "comments": "Client-side meme editor"
+  }
+}

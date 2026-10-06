@@ -1,0 +1,8 @@
+# Build output
+build/bin/
+
+# Wails generated JS bindings
+frontend/wailsjs/
+
+# OS / editor junk
+.DS_Store

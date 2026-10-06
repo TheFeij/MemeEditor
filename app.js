@@ -937,6 +937,34 @@
         img.src = url;
     }
 
+    const IMAGE_PATH_RE = /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i;
+
+    function isImagePath(path) {
+        return IMAGE_PATH_RE.test(path || "");
+    }
+
+    function hasBackend() {
+        return !!(window.go && window.go.main && window.go.main.App);
+    }
+
+    function loadImagePath(path, mode) {
+        if (!hasBackend()) return;
+        window.go.main.App.ReadImageFile(path)
+            .then(function (dataURL) {
+                const img = new Image();
+                img.onload = function () {
+                    handleLoadedImage(img, mode);
+                };
+                img.onerror = function () {
+                    toast("Could not read image file", "error");
+                };
+                img.src = dataURL;
+            })
+            .catch(function () {
+                toast("Could not read image file", "error");
+            });
+    }
+
     function handleLoadedImage(img, mode) {
         if (!img.naturalWidth || !img.naturalHeight) {
             toast("Image has no dimensions", "error");
@@ -1696,6 +1724,23 @@
                 toast("Export failed", "error");
                 return;
             }
+            if (hasBackend()) {
+                const reader = new FileReader();
+                reader.onload = function () {
+                    window.go.main.App.SaveImage(reader.result)
+                        .then(function (saved) {
+                            if (saved) toast("Saved " + saved);
+                        })
+                        .catch(function (err) {
+                            toast("Save failed: " + err, "error");
+                        });
+                };
+                reader.onerror = function () {
+                    toast("Save failed", "error");
+                };
+                reader.readAsDataURL(blob);
+                return;
+            }
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
             a.href = url;
@@ -2087,11 +2132,24 @@
         window.addEventListener("drop", function (e) {
             e.preventDefault();
             dropOverlay.classList.remove("visible");
+            if (hasBackend()) return;
             const files = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
             const file = files.find(isImageFile);
             if (file) loadImageFile(file, "auto");
             else toast("No image found in drop", "error");
         });
+
+        if (window.runtime && typeof window.runtime.OnFileDrop === "function") {
+            window.runtime.OnFileDrop(function (x, y, paths) {
+                dropOverlay.classList.remove("visible");
+                const images = (paths || []).filter(isImagePath);
+                if (!images.length) {
+                    toast("No image found in drop", "error");
+                    return;
+                }
+                loadImagePath(images[0], "auto");
+            }, false);
+        }
 
         // Clipboard paste
         window.addEventListener("paste", function (e) {
