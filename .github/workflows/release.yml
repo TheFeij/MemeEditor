@@ -1,0 +1,86 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux/amd64
+            tags: webkit2_41
+            artifact: MemeEditor-linux-amd64
+            binary: MemeEditor
+          - os: windows-latest
+            platform: windows/amd64
+            tags: ""
+            artifact: MemeEditor-windows-amd64
+            binary: MemeEditor.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.tags }}" ]; then
+            wails build -platform "${{ matrix.platform }}" -tags "${{ matrix.tags }}"
+          else
+            wails build -platform "${{ matrix.platform }}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: build/bin/${{ matrix.binary }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare assets
+        run: |
+          mkdir -p dist
+          cp artifacts/MemeEditor-linux-amd64/MemeEditor dist/MemeEditor-linux-amd64
+          cp artifacts/MemeEditor-windows-amd64/MemeEditor.exe dist/MemeEditor-windows-amd64.exe
+          ls -la dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          gh release create "$tag" dist/* --title "$tag" --generate-notes \
+            || gh release upload "$tag" dist/* --clobber
