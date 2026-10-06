@@ -5,7 +5,37 @@
     // Constants
     // ---------------------------------------------------------------------
 
-    const FONT_STACK = '"Zain Bold", "Zain", system-ui, sans-serif';
+    const DEFAULT_FONT = "Zain Bold";
+    const FONT_FALLBACK = '"Zain", "Vazirmatn", system-ui, sans-serif';
+
+    // Font discovery. When the app is served over HTTP we read the fonts
+    // folder directly (manifest first, then the directory listing). When it is
+    // opened from disk (file://) those fetches are blocked by the browser, so
+    // this bundled list is used as an offline fallback.
+    const FONT_DIR = "assets/fonts/";
+    const FONT_MANIFEST = FONT_DIR + "fonts.json";
+    const FONT_EXT_RE = /\.(ttf|otf|woff2?|eot)$/i;
+    const FONT_FILE_LIST = [
+        { file: "Zain-Bold.ttf", family: "Zain Bold" },
+        { file: "Zain/Zain-Regular.ttf", family: "Zain Regular" },
+        { file: "Zain/Zain-Black.ttf", family: "Zain Black" },
+        { file: "Zain/Zain-ExtraBold.ttf", family: "Zain ExtraBold" },
+        { file: "Zain/Zain-ExtraLight.ttf", family: "Zain ExtraLight" },
+        { file: "Zain/Zain-Light.ttf", family: "Zain Light" },
+        { file: "Zain/Zain-Italic.ttf", family: "Zain Italic" },
+        { file: "Zain/Zain-LightItalic.ttf", family: "Zain Light Italic" },
+        { file: "Vazirmatn/static/Vazirmatn-Regular.ttf", family: "Vazirmatn Regular" },
+        { file: "Vazirmatn/static/Vazirmatn-Black.ttf", family: "Vazirmatn Black" },
+        { file: "Vazirmatn/static/Vazirmatn-Bold.ttf", family: "Vazirmatn Bold" },
+        { file: "Vazirmatn/static/Vazirmatn-ExtraBold.ttf", family: "Vazirmatn ExtraBold" },
+        { file: "Vazirmatn/static/Vazirmatn-ExtraLight.ttf", family: "Vazirmatn ExtraLight" },
+        { file: "Vazirmatn/static/Vazirmatn-Light.ttf", family: "Vazirmatn Light" },
+        { file: "Vazirmatn/static/Vazirmatn-Medium.ttf", family: "Vazirmatn Medium" },
+        { file: "Vazirmatn/static/Vazirmatn-SemiBold.ttf", family: "Vazirmatn SemiBold" },
+        { file: "Vazirmatn/static/Vazirmatn-Thin.ttf", family: "Vazirmatn Thin" },
+        { file: "Vazirmatn/Vazirmatn-VariableFont_wght.ttf", family: "Vazirmatn Variable" }
+    ];
+
     const DEFAULT_CANVAS = { width: 800, height: 600 };
     const MAX_HISTORY = 120;
     const PRESET_STORAGE_KEY = "memeEditor.textPresets";
@@ -72,6 +102,9 @@
     let renderScale = 1;
     let zoom = 1; // 1 = fit to screen
     let displayScale = 1; // CSS pixels per document pixel
+
+    // Registered font faces discovered from the fonts folder.
+    let availableFonts = [];
 
     // ---------------------------------------------------------------------
     // DOM references
@@ -205,6 +238,11 @@
 
     function getCtx() {
         return canvas.getContext("2d");
+    }
+
+    function fontStack(family) {
+        const name = (family || DEFAULT_FONT).replace(/"/g, "");
+        return '"' + name + '", ' + FONT_FALLBACK;
     }
 
     function isResizable(obj) {
@@ -356,7 +394,7 @@
             x: x,
             y: y,
             text: "Text",
-            fontFamily: "Zain Bold",
+            fontFamily: DEFAULT_FONT,
             fontSize: 48,
             maxFontSize: 24,
             autoFit: false,
@@ -390,7 +428,7 @@
         let guard = 0;
         const lines = (obj.text || " ").split("\n");
         while (fs > 8 && guard < 600) {
-            ctx.font = fs + "px " + FONT_STACK;
+            ctx.font = fs + "px " + fontStack(obj.fontFamily);
             let w = 0;
             for (const line of lines) w = Math.max(w, ctx.measureText(line).width);
             if (w <= avail) break;
@@ -407,7 +445,7 @@
         const lineHeight = fontSize * 1.15;
         const lines = (obj.text || " ").split("\n");
         ctx.save();
-        ctx.font = fontSize + "px " + FONT_STACK;
+        ctx.font = fontSize + "px " + fontStack(obj.fontFamily);
         let width = 0;
         for (const line of lines) width = Math.max(width, ctx.measureText(line).width);
         ctx.restore();
@@ -536,7 +574,7 @@
         ctx.save();
         ctx.translate(obj.x, obj.y);
         ctx.scale(sx, sy);
-        ctx.font = m.fontSize + "px " + FONT_STACK;
+        ctx.font = m.fontSize + "px " + fontStack(obj.fontFamily);
         ctx.textAlign = obj.align;
         ctx.textBaseline = "middle";
         ctx.lineJoin = "round";
@@ -959,6 +997,178 @@
     }
 
     // ---------------------------------------------------------------------
+    // Fonts
+    // ---------------------------------------------------------------------
+
+    function deriveFontFamily(file) {
+        const base = file.split("/").pop().replace(FONT_EXT_RE, "");
+        const name = base.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+        return name || base;
+    }
+
+    function normalizeFontEntry(entry) {
+        const file = typeof entry === "string" ? entry : entry && entry.file;
+        if (!file || !FONT_EXT_RE.test(file)) return null;
+        let url;
+        if (/^(https?:)?\/\//i.test(file) || file.charAt(0) === "/") {
+            url = file;
+        } else if (file.indexOf(FONT_DIR) === 0) {
+            url = file;
+        } else {
+            url = FONT_DIR + file.replace(/^\.\//, "");
+        }
+        return {
+            family: (entry && entry.family) || deriveFontFamily(file),
+            url: url,
+            weight: (entry && entry.weight) || "normal",
+            style: (entry && entry.style) || "normal"
+        };
+    }
+
+    // Follow a directory listing (works with static servers that enable
+    // autoindex) to collect every font file under the fonts folder.
+    async function scanFontDirectory(root) {
+        const files = [];
+        const visited = new Set();
+        const queue = [{ path: root, depth: 0 }];
+        while (queue.length) {
+            const item = queue.shift();
+            if (item.depth > 4 || visited.has(item.path)) continue;
+            visited.add(item.path);
+            let html;
+            try {
+                const res = await fetch(item.path, { cache: "no-store" });
+                if (!res.ok) continue;
+                const type = res.headers.get("content-type") || "";
+                if (type && type.indexOf("html") === -1) continue;
+                html = await res.text();
+            } catch (err) {
+                continue;
+            }
+            const re = /href\s*=\s*["']([^"']+)["']/gi;
+            let m;
+            while ((m = re.exec(html))) {
+                let href = m[1].split("?")[0].split("#")[0];
+                if (!href || href.indexOf("javascript:") === 0) continue;
+                href = decodeURIComponent(href);
+                if (href.charAt(0) === "/") href = href.slice(1);
+                if (href.indexOf("..") === 0) continue;
+                if (href.indexOf("./") === 0) href = href.slice(2);
+                if (!href) continue;
+                if (href.charAt(href.length - 1) === "/") {
+                    queue.push({ path: item.path + href, depth: item.depth + 1 });
+                } else if (FONT_EXT_RE.test(href)) {
+                    files.push(href.indexOf(item.path) === 0 ? href : item.path + href);
+                }
+            }
+        }
+        return files;
+    }
+
+    async function discoverFonts() {
+        const entries = [];
+        try {
+            const res = await fetch(FONT_MANIFEST, { cache: "no-store" });
+            if (res.ok) {
+                const data = await res.json();
+                const list = Array.isArray(data) ? data : (data && data.fonts) || [];
+                for (const e of list) entries.push(e);
+            }
+        } catch (err) {
+            /* fall through to bundled list */
+        }
+        for (const f of FONT_FILE_LIST) entries.push(f);
+        try {
+            const scanned = await scanFontDirectory(FONT_DIR);
+            for (const f of scanned) entries.push(f);
+        } catch (err) {
+            /* directory listing unavailable */
+        }
+        const result = [];
+        const byUrl = new Set();
+        for (const e of entries) {
+            const norm = normalizeFontEntry(e);
+            if (!norm || byUrl.has(norm.url)) continue;
+            byUrl.add(norm.url);
+            result.push(norm);
+        }
+        return result;
+    }
+
+    function registerFontFaces(list) {
+        const css = list
+            .map(function (f) {
+                const family = f.family.replace(/"/g, "");
+                return (
+                    '@font-face{font-family:"' + family + '";src:url("' + f.url + '");' +
+                    "font-weight:" + f.weight + ";font-style:" + f.style + ";font-display:swap;}"
+                );
+            })
+            .join("\n");
+        let el = document.getElementById("dynamic-font-faces");
+        if (!el) {
+            el = document.createElement("style");
+            el.id = "dynamic-font-faces";
+            document.head.appendChild(el);
+        }
+        el.textContent = css;
+    }
+
+    function renderFontOptions() {
+        const seen = new Set();
+        const families = [];
+        for (const f of availableFonts) {
+            if (seen.has(f.family)) continue;
+            seen.add(f.family);
+            families.push(f.family);
+        }
+        if (!families.length) families.push(DEFAULT_FONT);
+        textFont.innerHTML = "";
+        for (const fam of families) {
+            const opt = document.createElement("option");
+            opt.value = fam;
+            opt.textContent = fam;
+            textFont.appendChild(opt);
+        }
+        const obj = selectedTextObject();
+        setFontSelectValue(obj ? obj.fontFamily : DEFAULT_FONT);
+    }
+
+    function setFontSelectValue(family) {
+        if (!family) family = DEFAULT_FONT;
+        const known = Array.prototype.some.call(textFont.options, function (o) {
+            return o.value === family;
+        });
+        if (!known) {
+            const opt = document.createElement("option");
+            opt.value = family;
+            opt.textContent = family;
+            textFont.appendChild(opt);
+        }
+        textFont.value = family;
+    }
+
+    function ensureFontLoaded(family) {
+        if (!document.fonts || !document.fonts.load || !family) return Promise.resolve();
+        return document.fonts.load('64px "' + family.replace(/"/g, "") + '"').catch(function () {});
+    }
+
+    function initFonts() {
+        return discoverFonts().then(function (list) {
+            availableFonts = list;
+            registerFontFaces(availableFonts);
+            renderFontOptions();
+            const loads = availableFonts.map(function (f) {
+                return ensureFontLoaded(f.family);
+            });
+            Promise.all(loads).then(function () {
+                render();
+                syncUI();
+            });
+        });
+    }
+
+    // ---------------------------------------------------------------------
     // Tool + UI sync
     // ---------------------------------------------------------------------
 
@@ -1002,6 +1212,7 @@
 
         if (obj && obj.type === "text") {
             textContent.value = obj.text;
+            setFontSelectValue(obj.fontFamily);
             textSize.value = obj.fontSize;
             textSizeValue.textContent = Math.round(
                 getEffectiveFontSize(obj) * (obj.scaleY == null ? 1 : obj.scaleY)
@@ -1676,6 +1887,9 @@
             obj.fontFamily = textFont.value;
             commit();
             render();
+            ensureFontLoaded(obj.fontFamily).then(function () {
+                render();
+            });
         });
         textSize.addEventListener("input", function () {
             const obj = selectedTextObject();
@@ -1996,16 +2210,7 @@
         render();
         syncUI();
 
-        if (document.fonts && document.fonts.load) {
-            Promise.all([
-                document.fonts.load("700 64px \"Zain Bold\""),
-                document.fonts.load("64px \"Zain Bold\"")
-            ])
-                .then(function () {
-                    render();
-                })
-                .catch(function () {});
-        }
+        initFonts();
         if (document.fonts && document.fonts.ready) {
             document.fonts.ready.then(function () {
                 render();
