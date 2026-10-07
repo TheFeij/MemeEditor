@@ -14,8 +14,8 @@
   <a href="https://github.com/TheFeij/MemeEditor/actions/workflows/release.yml">
     <img src="https://github.com/TheFeij/MemeEditor/actions/workflows/release.yml/badge.svg" alt="Build & Release">
   </a>
-  <a href="https://github.com/TheFeij/MemeEditor/releases/latest">
-    <img src="https://img.shields.io/github/v/release/TheFeij/MemeEditor" alt="Latest release">
+  <a href="https://github.com/TheFeij/MemeEditor/releases/tag/v1.1.0">
+    <img src="https://img.shields.io/badge/release-v1.1.0-4f74ff" alt="Release v1.1.0">
   </a>
 </p>
 
