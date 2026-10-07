@@ -61,6 +61,7 @@
                         <select id="brush-mode">
                             <option value="draw">Draw</option>
                             <option value="cover">Cover / Remove</option>
+                            <option value="blur">Blur background</option>
                         </select>
                     </div>
                     <div class="field">
@@ -70,6 +71,10 @@
                     <div class="field">
                         <label>Size <span id="brush-size-value">10</span></label>
                         <input type="range" id="brush-size" min="1" max="120" value="10" />
+                    </div>
+                    <div class="field hidden" id="brush-blur-field">
+                        <label>Blur strength <span id="brush-blur-value">16</span></label>
+                        <input type="range" id="brush-blur" min="1" max="150" value="16" />
                     </div>
                     <button id="btn-cover-bg" class="btn btn-ghost btn-sm" type="button">Use background color</button>
                 </section>
@@ -164,6 +169,13 @@
                         </div>
                     </div>
                     <div class="field">
+                        <label>Direction</label>
+                        <div class="seg" id="text-direction">
+                            <button type="button" data-dir="rtl">RTL (فارسی)</button>
+                            <button type="button" data-dir="ltr">LTR</button>
+                        </div>
+                    </div>
+                    <div class="field">
                         <label>Text color</label>
                         <input type="color" id="text-color" value="#ffffff" />
                     </div>
@@ -191,6 +203,18 @@
                             <button id="preset-save" class="btn btn-sm" type="button">Save current</button>
                         </div>
                         <button id="preset-rename" class="btn btn-sm btn-ghost" type="button">Rename selected</button>
+                        <button id="preset-set-default" class="btn btn-sm btn-ghost" type="button">Set as default for new text</button>
+                    </div>
+                </section>
+
+                <section class="prop-section hidden" id="prop-order">
+                    <h3 class="section-title">Arrange</h3>
+                    <div class="row gap">
+                        <button id="order-forward" class="btn btn-sm" type="button">Bring forward</button>
+                        <button id="order-backward" class="btn btn-sm" type="button">Send backward</button>
+                    </div>
+                    <div class="row gap">
+                        <button id="btn-delete" class="btn btn-sm btn-danger" type="button">Delete selected</button>
                     </div>
                 </section>
 
@@ -209,8 +233,19 @@
                 <section class="prop-section hidden" id="prop-shape">
                     <h3 class="section-title">Shape</h3>
                     <div class="field">
+                        <label>Paint</label>
+                        <div class="seg" id="shape-mode">
+                            <button type="button" data-mode="fill">Color</button>
+                            <button type="button" data-mode="blur">Blur</button>
+                        </div>
+                    </div>
+                    <div class="field" id="shape-fill-field">
                         <label>Fill</label>
                         <input type="color" id="shape-fill" value="#ff0000" />
+                    </div>
+                    <div class="field hidden" id="shape-blur-field">
+                        <label>Blur strength <span id="shape-blur-value">16</span></label>
+                        <input type="range" id="shape-blur" min="1" max="150" value="16" />
                     </div>
                     <div class="field hidden" id="shape-radius-field">
                         <label>Corner radius <span id="shape-radius-value">12</span></label>
@@ -228,13 +263,16 @@
                     <p class="hint" id="crop-size"></p>
                 </section>
 
-                <section class="prop-section hidden" id="prop-order">
-                    <h3 class="section-title">Arrange</h3>
-                    <div class="row gap">
-                        <button id="order-forward" class="btn btn-sm" type="button">Bring forward</button>
-                        <button id="order-backward" class="btn btn-sm" type="button">Send backward</button>
+                <section class="prop-section hidden" id="prop-transform">
+                    <h3 class="section-title">Transform</h3>
+                    <div class="field">
+                        <label>Rotation <span id="rotation-value">0</span>°</label>
+                        <input type="range" id="rotation-range" min="-180" max="180" value="0" step="1" />
                     </div>
-                    <button id="btn-delete" class="btn btn-sm btn-danger" type="button">Delete selected</button>
+                    <div class="row gap">
+                        <input type="number" id="rotation-input" min="-360" max="360" step="1" value="0" />
+                        <button id="rotation-reset" class="btn btn-sm btn-ghost" type="button">Reset</button>
+                    </div>
                 </section>
             </aside>
         </main>

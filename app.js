@@ -39,8 +39,14 @@
     const DEFAULT_CANVAS = { width: 800, height: 600 };
     const MAX_HISTORY = 120;
     const PRESET_STORAGE_KEY = "memeEditor.textPresets";
+    const DEFAULT_PRESET_STORAGE_KEY = "memeEditor.defaultTextPreset";
+    // Default writing direction for new text. The main use case is Farsi with
+    // embedded English words, so RTL (which still renders Latin runs correctly)
+    // is the default until the user changes it.
+    const DEFAULT_TEXT_DIRECTION = "rtl";
     const DEFAULT_SHAPE_FILL = "#ff0000";
     const DEFAULT_RECT_RADIUS = 12;
+    const DEFAULT_BLUR_RADIUS = 16;
 
     // Render the document at a higher internal resolution so text (and vector
     // shapes) stay crisp even when the base image is small. The long edge is
@@ -80,10 +86,13 @@
         objects: [],
         selectedObjectId: null,
         activeTool: "select",
-        brush: { mode: "draw", color: "#000000", size: 10 },
+        brush: { mode: "draw", color: "#000000", size: 10, blurRadius: DEFAULT_BLUR_RADIUS },
         currentColor: "#000000",
         currentShapeFill: DEFAULT_SHAPE_FILL,
-        textPresets: []
+        currentShapeMode: "fill",
+        currentShapeBlur: DEFAULT_BLUR_RADIUS,
+        textPresets: [],
+        defaultPresetId: null
     };
 
     let history = [];
@@ -127,6 +136,9 @@
     const brushColor = $("brush-color");
     const brushSize = $("brush-size");
     const brushSizeValue = $("brush-size-value");
+    const brushBlurField = $("brush-blur-field");
+    const brushBlur = $("brush-blur");
+    const brushBlurValue = $("brush-blur-value");
     const btnCoverBg = $("btn-cover-bg");
 
     const padTop = $("pad-top");
@@ -146,6 +158,7 @@
     const propShape = $("prop-shape");
     const propCrop = $("prop-crop");
     const propOrder = $("prop-order");
+    const propTransform = $("prop-transform");
 
     const cropApply = $("crop-apply");
     const cropCancel = $("crop-cancel");
@@ -158,6 +171,7 @@
     const textAutoFit = $("text-autofit");
     const textMaxSize = $("text-maxsize");
     const textAlignEl = $("text-align");
+    const textDirectionEl = $("text-direction");
     const textColor = $("text-color");
     const textOutlineEnabled = $("text-outline-enabled");
     const textOutlineColor = $("text-outline-color");
@@ -170,6 +184,12 @@
     const presetSave = $("preset-save");
     const presetRename = $("preset-rename");
     const presetDelete = $("preset-delete");
+    const presetSetDefault = $("preset-set-default");
+
+    const rotationRange = $("rotation-range");
+    const rotationInput = $("rotation-input");
+    const rotationValue = $("rotation-value");
+    const rotationReset = $("rotation-reset");
 
     const imageOpacity = $("image-opacity");
     const imageOpacityValue = $("image-opacity-value");
@@ -177,6 +197,11 @@
     const imageHeight = $("image-height");
 
     const shapeFill = $("shape-fill");
+    const shapeFillField = $("shape-fill-field");
+    const shapeModeEl = $("shape-mode");
+    const shapeBlurField = $("shape-blur-field");
+    const shapeBlur = $("shape-blur");
+    const shapeBlurValue = $("shape-blur-value");
     const shapeRadiusField = $("shape-radius-field");
     const shapeRadius = $("shape-radius");
     const shapeRadiusValue = $("shape-radius-value");
@@ -252,6 +277,42 @@
             obj.type === "ellipse" ||
             obj.type === "image"
         );
+    }
+
+    function isRotatable(obj) {
+        return !!obj && obj.type !== "brush";
+    }
+
+    function normalizeAngle(deg) {
+        let a = deg % 360;
+        if (a > 180) a -= 360;
+        if (a <= -180) a += 360;
+        return a;
+    }
+
+    function rotatePoint(p, center, angleDeg) {
+        const a = (angleDeg * Math.PI) / 180;
+        const cos = Math.cos(a);
+        const sin = Math.sin(a);
+        const dx = p.x - center.x;
+        const dy = p.y - center.y;
+        return {
+            x: center.x + dx * cos - dy * sin,
+            y: center.y + dx * sin + dy * cos
+        };
+    }
+
+    function getObjectCenter(obj) {
+        const b = getObjectBounds(obj);
+        return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    }
+
+    // Map a document-space point into an object's unrotated local frame so the
+    // existing axis-aligned hit-testing / handle logic keeps working.
+    function toLocalPoint(obj, point) {
+        const rot = obj.rotation || 0;
+        if (!rot) return point;
+        return rotatePoint(point, getObjectCenter(obj), -rot);
     }
 
     // ---------------------------------------------------------------------
@@ -388,7 +449,7 @@
     // ---------------------------------------------------------------------
 
     function createTextObject(x, y) {
-        return {
+        const obj = {
             id: uid(),
             type: "text",
             x: x,
@@ -403,9 +464,32 @@
             outlineWidth: 4,
             outlineEnabled: true,
             align: "center",
+            direction: DEFAULT_TEXT_DIRECTION,
+            rotation: 0,
             scaleX: 1,
             scaleY: 1
         };
+        const preset = getDefaultPreset();
+        if (preset) applyTextPreset(obj, preset);
+        return obj;
+    }
+
+    function getDefaultPreset() {
+        if (!state.defaultPresetId) return null;
+        return state.textPresets.find((p) => p.id === state.defaultPresetId) || null;
+    }
+
+    function applyTextPreset(obj, preset) {
+        obj.fontFamily = preset.fontFamily;
+        obj.maxFontSize = preset.maxFontSize;
+        obj.fontSize = preset.maxFontSize;
+        obj.autoFit = true;
+        obj.align = preset.align;
+        obj.color = preset.color;
+        obj.outlineColor = preset.outlineColor;
+        obj.outlineWidth = preset.outlineWidth;
+        obj.outlineEnabled = preset.outlineEnabled;
+        obj.direction = preset.direction || DEFAULT_TEXT_DIRECTION;
     }
 
     function getSelectedObject() {
@@ -486,11 +570,12 @@
         for (let i = state.objects.length - 1; i >= 0; i--) {
             const o = state.objects[i];
             const b = getObjectBounds(o);
+            const p = toLocalPoint(o, point);
             if (
-                point.x >= b.x &&
-                point.x <= b.x + b.width &&
-                point.y >= b.y &&
-                point.y <= b.y + b.height
+                p.x >= b.x &&
+                p.x <= b.x + b.width &&
+                p.y >= b.y &&
+                p.y <= b.y + b.height
             ) {
                 return o;
             }
@@ -526,18 +611,41 @@
 
     function hitHandle(obj, point) {
         if (!isResizable(obj)) return null;
+        const local = toLocalPoint(obj, point);
         const handles = getHandleRects(obj);
         for (const h of handles) {
             if (
-                point.x >= h.x &&
-                point.x <= h.x + h.width &&
-                point.y >= h.y &&
-                point.y <= h.y + h.height
+                local.x >= h.x &&
+                local.x <= h.x + h.width &&
+                local.y >= h.y &&
+                local.y <= h.y + h.height
             ) {
                 return h.name;
             }
         }
         return null;
+    }
+
+    function getRotateHandleRect(obj) {
+        const b = getObjectBounds(obj);
+        const u = 1 / (displayScale > 0 ? displayScale : 1);
+        const s = handleSizeDoc() * 1.15;
+        const gap = 26 * u;
+        const cx = b.x + b.width / 2;
+        const cy = b.y - gap;
+        return { x: cx - s / 2, y: cy - s / 2, width: s, height: s };
+    }
+
+    function hitRotateHandle(obj, point) {
+        if (!isRotatable(obj)) return false;
+        const local = toLocalPoint(obj, point);
+        const r = getRotateHandleRect(obj);
+        const cx = r.x + r.width / 2;
+        const cy = r.y + r.height / 2;
+        const radius = r.width / 2 + 3 / (displayScale > 0 ? displayScale : 1);
+        const dx = local.x - cx;
+        const dy = local.y - cy;
+        return dx * dx + dy * dy <= radius * radius;
     }
 
     // ---------------------------------------------------------------------
@@ -567,6 +675,188 @@
         ctx.restore();
     }
 
+    // Build the silhouette of an object as the current path so it can be used
+    // as a clip region for the special "blur" paint mode.
+    function objectPath(ctx, obj) {
+        if (obj.type === "rect") {
+            const r = Math.max(
+                0,
+                Math.min(
+                    obj.radius == null ? DEFAULT_RECT_RADIUS : obj.radius,
+                    Math.abs(obj.width) / 2,
+                    Math.abs(obj.height) / 2
+                )
+            );
+            if (r > 0 && ctx.roundRect) ctx.roundRect(obj.x, obj.y, obj.width, obj.height, r);
+            else ctx.rect(obj.x, obj.y, obj.width, obj.height);
+        } else if (obj.type === "ellipse") {
+            ctx.ellipse(
+                obj.x + obj.width / 2,
+                obj.y + obj.height / 2,
+                Math.abs(obj.width / 2),
+                Math.abs(obj.height / 2),
+                0,
+                0,
+                Math.PI * 2
+            );
+        } else if (obj.type === "brush") {
+            const rr = Math.max(1, (obj.size || 1) / 2);
+            const pts = obj.points;
+            const dot = (x, y) => {
+                ctx.moveTo(x + rr, y);
+                ctx.arc(x, y, rr, 0, Math.PI * 2);
+            };
+            if (pts.length === 1) {
+                dot(pts[0].x, pts[0].y);
+            }
+            for (let i = 1; i < pts.length; i++) {
+                const a = pts[i - 1];
+                const b = pts[i];
+                const dist = Math.hypot(b.x - a.x, b.y - a.y);
+                const steps = Math.max(1, Math.ceil(dist / rr));
+                for (let s = 0; s <= steps; s++) {
+                    const t = s / steps;
+                    dot(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+                }
+            }
+        }
+    }
+
+    const scratch = { b: null };
+    function getScratch(key, w, h) {
+        let c = scratch[key];
+        if (!c) {
+            c = document.createElement("canvas");
+            scratch[key] = c;
+        }
+        if (c.width !== w) c.width = w;
+        if (c.height !== h) c.height = h;
+        return c;
+    }
+
+    function deviceScaleOf(ctx) {
+        const t = ctx.getTransform();
+        return Math.hypot(t.a, t.b) || 1;
+    }
+
+    // One separable box-blur pass over an ImageData buffer. `horizontal`
+    // selects the axis. Edge pixels are replicated so the blur fades cleanly.
+    function boxBlurPass(data, w, h, r, horizontal) {
+        const outer = horizontal ? h : w;
+        const inner = horizontal ? w : h;
+        const innerStride = horizontal ? 4 : w * 4;
+        const outerStride = horizontal ? w * 4 : 4;
+        const win = 2 * r + 1;
+        const tmp = new Float32Array(inner * 4);
+        for (let o = 0; o < outer; o++) {
+            const base = o * outerStride;
+            let sr = 0;
+            let sg = 0;
+            let sb = 0;
+            let sa = 0;
+            for (let i = -r; i <= r; i++) {
+                const ii = i < 0 ? 0 : i >= inner ? inner - 1 : i;
+                const idx = base + ii * innerStride;
+                sr += data[idx];
+                sg += data[idx + 1];
+                sb += data[idx + 2];
+                sa += data[idx + 3];
+            }
+            for (let x = 0; x < inner; x++) {
+                const oi = x * 4;
+                tmp[oi] = sr / win;
+                tmp[oi + 1] = sg / win;
+                tmp[oi + 2] = sb / win;
+                tmp[oi + 3] = sa / win;
+                const addI = x + r + 1;
+                const subI = x - r;
+                const ai = base + (addI >= inner ? inner - 1 : addI) * innerStride;
+                const si = base + (subI < 0 ? 0 : subI) * innerStride;
+                sr += data[ai] - data[si];
+                sg += data[ai + 1] - data[si + 1];
+                sb += data[ai + 2] - data[si + 2];
+                sa += data[ai + 3] - data[si + 3];
+            }
+            for (let x = 0; x < inner; x++) {
+                const idx = base + x * innerStride;
+                const oi = x * 4;
+                data[idx] = tmp[oi];
+                data[idx + 1] = tmp[oi + 1];
+                data[idx + 2] = tmp[oi + 2];
+                data[idx + 3] = tmp[oi + 3];
+            }
+        }
+    }
+
+    // Blur the background (everything beneath this object) inside its shape.
+    // Uses a real pixel blur instead of ctx.filter, which is not available in
+    // some embedded webviews (e.g. WebKitGTK used by Wails on Linux).
+    function renderBlurFill(ctx, obj) {
+        const radius = Math.max(1, obj.blurRadius || DEFAULT_BLUR_RADIUS);
+        const scale = deviceScaleOf(ctx);
+        const canvas = ctx.canvas;
+        const t = ctx.getTransform();
+        const b = getObjectBounds(obj);
+
+        const corners = [
+            { x: b.x, y: b.y },
+            { x: b.x + b.width, y: b.y },
+            { x: b.x + b.width, y: b.y + b.height },
+            { x: b.x, y: b.y + b.height }
+        ].map((p) => ({
+            x: t.a * p.x + t.c * p.y + t.e,
+            y: t.b * p.x + t.d * p.y + t.f
+        }));
+
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const p of corners) {
+            minX = Math.min(minX, p.x);
+            minY = Math.min(minY, p.y);
+            maxX = Math.max(maxX, p.x);
+            maxY = Math.max(maxY, p.y);
+        }
+
+        const rDev = Math.max(1, Math.round(radius * scale));
+        const pad = rDev * 2 + 4;
+        const x0 = clamp(Math.floor(minX - pad), 0, canvas.width);
+        const y0 = clamp(Math.floor(minY - pad), 0, canvas.height);
+        const x1 = clamp(Math.ceil(maxX + pad), 0, canvas.width);
+        const y1 = clamp(Math.ceil(maxY + pad), 0, canvas.height);
+        const rw = x1 - x0;
+        const rh = y1 - y0;
+        if (rw < 1 || rh < 1) return;
+
+        const img = (function () {
+            try {
+                return ctx.getImageData(x0, y0, rw, rh);
+            } catch (err) {
+                return null;
+            }
+        })();
+        if (!img) return;
+        // ~radius*scale total spread, approximated with three box passes.
+        const passR = Math.max(1, Math.round(rDev / 3));
+        for (let i = 0; i < 3; i++) {
+            boxBlurPass(img.data, rw, rh, passR, true);
+            boxBlurPass(img.data, rw, rh, passR, false);
+        }
+
+        const blur = getScratch("b", rw, rh);
+        blur.getContext("2d").putImageData(img, 0, 0);
+
+        ctx.save();
+        ctx.beginPath();
+        objectPath(ctx, obj);
+        ctx.clip();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(blur, x0, y0);
+        ctx.restore();
+    }
+
+
     function renderText(ctx, obj) {
         const m = getTextMetrics(obj);
         const sx = obj.scaleX == null ? 1 : obj.scaleX;
@@ -575,6 +865,7 @@
         ctx.translate(obj.x, obj.y);
         ctx.scale(sx, sy);
         ctx.font = m.fontSize + "px " + fontStack(obj.fontFamily);
+        ctx.direction = obj.direction === "ltr" ? "ltr" : "rtl";
         ctx.textAlign = obj.align;
         ctx.textBaseline = "middle";
         ctx.lineJoin = "round";
@@ -594,11 +885,23 @@
     }
 
     function renderObject(ctx, obj) {
+        const rot = obj.rotation || 0;
+        if (rot) {
+            const c = getObjectCenter(obj);
+            ctx.save();
+            ctx.translate(c.x, c.y);
+            ctx.rotate((rot * Math.PI) / 180);
+            ctx.translate(-c.x, -c.y);
+        }
         switch (obj.type) {
             case "text":
                 renderText(ctx, obj);
                 break;
             case "rect": {
+                if (obj.mode === "blur") {
+                    renderBlurFill(ctx, obj);
+                    break;
+                }
                 ctx.fillStyle = obj.fill;
                 const r = Math.max(
                     0,
@@ -618,6 +921,10 @@
                 break;
             }
             case "ellipse":
+                if (obj.mode === "blur") {
+                    renderBlurFill(ctx, obj);
+                    break;
+                }
                 ctx.beginPath();
                 ctx.fillStyle = obj.fill;
                 ctx.ellipse(
@@ -640,11 +947,16 @@
                 }
                 break;
             case "brush":
-                renderBrush(ctx, obj);
+                if (obj.mode === "blur") {
+                    renderBlurFill(ctx, obj);
+                } else {
+                    renderBrush(ctx, obj);
+                }
                 break;
             default:
                 break;
         }
+        if (rot) ctx.restore();
     }
 
     function renderDocument(ctx) {
@@ -669,7 +981,14 @@
         const b = getObjectBounds(obj);
         const u = 1 / (displayScale > 0 ? displayScale : 1); // document units per CSS pixel
         const pad = 3 * u;
+        const cx = b.x + b.width / 2;
+        const cy = b.y + b.height / 2;
         ctx.save();
+        if (obj.rotation) {
+            ctx.translate(cx, cy);
+            ctx.rotate((obj.rotation * Math.PI) / 180);
+            ctx.translate(-cx, -cy);
+        }
         ctx.strokeStyle = "#4f74ff";
         ctx.lineWidth = 1.5 * u;
         ctx.setLineDash([6 * u, 4 * u]);
@@ -685,6 +1004,25 @@
                 ctx.fillRect(h.x, h.y, h.width, h.height);
                 ctx.strokeRect(h.x, h.y, h.width, h.height);
             }
+        }
+
+        if (isRotatable(obj)) {
+            const rh = getRotateHandleRect(obj);
+            const rcx = rh.x + rh.width / 2;
+            const rcy = rh.y + rh.height / 2;
+            ctx.strokeStyle = "#4f74ff";
+            ctx.lineWidth = 1.5 * u;
+            ctx.beginPath();
+            ctx.moveTo(cx, b.y);
+            ctx.lineTo(rcx, rcy);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(rcx, rcy, rh.width / 2, 0, Math.PI * 2);
+            ctx.fillStyle = "#4f74ff";
+            ctx.fill();
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 1 * u;
+            ctx.stroke();
         }
         ctx.restore();
     }
@@ -1218,6 +1556,32 @@
         syncUI();
     }
 
+    function updateRotationUI(obj) {
+        const rot = normalizeAngle(obj.rotation || 0);
+        rotationRange.value = Math.round(rot);
+        rotationInput.value = Math.round(rot);
+        rotationValue.textContent = Math.round(rot);
+        rotationReset.disabled = !(obj.rotation || 0);
+    }
+
+    function textDisplaySize(obj) {
+        return Math.round(getEffectiveFontSize(obj) * (obj.scaleY == null ? 1 : obj.scaleY));
+    }
+
+    function updateTextSizeUI(obj) {
+        const size = textDisplaySize(obj);
+        textSize.value = clamp(size, 8, 400);
+        textSizeValue.textContent = size;
+    }
+
+    function setSelectedRotation(deg) {
+        const obj = getSelectedObject();
+        if (!obj) return;
+        obj.rotation = normalizeAngle(deg);
+        updateRotationUI(obj);
+        requestRender();
+    }
+
     function syncUI() {
         document.querySelectorAll(".tool").forEach((btn) => {
             btn.classList.toggle("active", btn.dataset.tool === state.activeTool);
@@ -1231,6 +1595,9 @@
         propShape.classList.toggle("hidden", !(obj && (obj.type === "rect" || obj.type === "ellipse")));
         propCrop.classList.toggle("hidden", !cropping);
         propOrder.classList.toggle("hidden", !obj || cropping);
+        propTransform.classList.toggle("hidden", !obj || cropping);
+
+        if (obj) updateRotationUI(obj);
 
         const cropReady = !!crop && crop.width >= 2 && crop.height >= 2;
         cropApply.disabled = !cropReady;
@@ -1241,12 +1608,11 @@
         if (obj && obj.type === "text") {
             textContent.value = obj.text;
             setFontSelectValue(obj.fontFamily);
-            textSize.value = obj.fontSize;
-            textSizeValue.textContent = Math.round(
-                getEffectiveFontSize(obj) * (obj.scaleY == null ? 1 : obj.scaleY)
-            );
+            updateTextSizeUI(obj);
+            textSize.disabled = !!obj.autoFit;
             textAutoFit.checked = !!obj.autoFit;
             textMaxSize.value = obj.maxFontSize;
+            textMaxSize.disabled = !obj.autoFit;
             textColor.value = obj.color;
             textOutlineEnabled.checked = !!obj.outlineEnabled;
             textOutlineColor.value = obj.outlineColor;
@@ -1254,6 +1620,10 @@
             textOutlineValue.textContent = obj.outlineWidth;
             textAlignEl.querySelectorAll("button").forEach((b) => {
                 b.classList.toggle("active", b.dataset.align === obj.align);
+            });
+            const dir = obj.direction || DEFAULT_TEXT_DIRECTION;
+            textDirectionEl.querySelectorAll("button").forEach((b) => {
+                b.classList.toggle("active", (b.dataset.dir || DEFAULT_TEXT_DIRECTION) === dir);
             });
             const preset = state.textPresets.find((p) => p.fontFamily === obj.fontFamily);
             if (preset) presetSelect.value = preset.id;
@@ -1269,9 +1639,21 @@
 
         if (obj && (obj.type === "rect" || obj.type === "ellipse")) {
             shapeFill.value = obj.fill;
+            const mode = obj.mode || "fill";
+            shapeModeEl.querySelectorAll("button").forEach((b) => {
+                b.classList.toggle("active", (b.dataset.mode || "fill") === mode);
+            });
+            shapeFillField.classList.toggle("hidden", mode !== "fill");
+            const special = mode === "blur";
+            shapeBlurField.classList.toggle("hidden", !special);
+            if (special) {
+                const br = obj.blurRadius == null ? DEFAULT_BLUR_RADIUS : obj.blurRadius;
+                shapeBlur.value = br;
+                shapeBlurValue.textContent = Math.round(br);
+            }
             const isRect = obj.type === "rect";
-            shapeRadiusField.classList.toggle("hidden", !isRect);
-            if (isRect) {
+            shapeRadiusField.classList.toggle("hidden", !isRect || special);
+            if (isRect && !special) {
                 const r = obj.radius == null ? DEFAULT_RECT_RADIUS : obj.radius;
                 shapeRadius.value = r;
                 shapeRadiusValue.textContent = Math.round(r);
@@ -1326,7 +1708,8 @@
                 points: [{ x: p.x, y: p.y }],
                 color: state.brush.color,
                 size: state.brush.size,
-                mode: state.brush.mode
+                mode: state.brush.mode,
+                blurRadius: state.brush.blurRadius
             };
             state.objects.push(stroke);
             state.selectedObjectId = stroke.id;
@@ -1357,7 +1740,9 @@
                 width: 0,
                 height: 0,
                 fill: state.currentShapeFill,
-                radius: DEFAULT_RECT_RADIUS
+                radius: DEFAULT_RECT_RADIUS,
+                mode: state.currentShapeMode,
+                blurRadius: state.currentShapeBlur
             };
             state.objects.push(shape);
             state.selectedObjectId = shape.id;
@@ -1370,6 +1755,17 @@
         // Select tool
         const selected = getSelectedObject();
         if (selected) {
+            if (hitRotateHandle(selected, p)) {
+                const c = getObjectCenter(selected);
+                interaction = {
+                    kind: "rotate",
+                    object: selected,
+                    center: c,
+                    startAngle: (Math.atan2(p.y - c.y, p.x - c.x) * 180) / Math.PI,
+                    startRotation: selected.rotation || 0
+                };
+                return;
+            }
             const handle = hitHandle(selected, p);
             if (handle) {
                 interaction = {
@@ -1405,7 +1801,14 @@
     function snapshotResize(obj) {
         if (obj.type === "text") {
             const m = getTextMetrics(obj);
-            return { baseWidth: m.width || 1, baseHeight: m.height || 1 };
+            return {
+                baseWidth: m.width || 1,
+                baseHeight: m.height || 1,
+                fontSize: obj.fontSize,
+                maxFontSize: obj.maxFontSize,
+                scaleX: obj.scaleX == null ? 1 : obj.scaleX,
+                scaleY: obj.scaleY == null ? 1 : obj.scaleY
+            };
         }
         return {};
     }
@@ -1442,12 +1845,24 @@
         if (obj.type === "text") {
             const baseW = inter.original.baseWidth || 1;
             const baseH = inter.original.baseHeight || 1;
-            obj.scaleX = clamp(nw / baseW, 0.05, 50);
-            obj.scaleY = clamp(nh / baseH, 0.05, 50);
+            // Fold the vertical scaling into the real font size so the size
+            // value always reflects what is actually rendered. Any remaining
+            // horizontal difference becomes a horizontal stretch (scaleX).
+            const tY = nh / baseH;
+            if (obj.autoFit) {
+                const startMax = inter.original.maxFontSize || obj.maxFontSize || obj.fontSize;
+                obj.maxFontSize = clamp(startMax * tY, 8, 400);
+            } else {
+                const startSize = inter.original.fontSize || obj.fontSize;
+                obj.fontSize = clamp(startSize * tY, 8, 400);
+            }
+            obj.scaleY = 1;
+            obj.scaleX = clamp(nw / (baseW * tY), 0.05, 50);
             if (obj.align === "left") obj.x = left;
             else if (obj.align === "right") obj.x = right;
             else obj.x = left + nw / 2;
             obj.y = top + nh / 2;
+            updateTextSizeUI(obj);
         } else {
             obj.x = left;
             obj.y = top;
@@ -1461,6 +1876,10 @@
         const p = getDocPoint(event);
         const selected = getSelectedObject();
         if (selected) {
+            if (hitRotateHandle(selected, p)) {
+                canvas.style.cursor = "grab";
+                return;
+            }
             const handle = hitHandle(selected, p);
             if (handle) {
                 canvas.style.cursor = HANDLE_CURSORS[handle] || "default";
@@ -1511,8 +1930,26 @@
             return;
         }
 
+        if (interaction.kind === "rotate") {
+            const c = interaction.center;
+            const ang = (Math.atan2(p.y - c.y, p.x - c.x) * 180) / Math.PI;
+            let rot = interaction.startRotation + (ang - interaction.startAngle);
+            if (event.shiftKey) rot = Math.round(rot / 15) * 15;
+            interaction.object.rotation = normalizeAngle(rot);
+            updateRotationUI(interaction.object);
+            requestRender();
+            return;
+        }
+
         if (interaction.kind === "resize") {
-            applyResize(interaction, p);
+            let pp = p;
+            const rot = interaction.object.rotation || 0;
+            if (rot) {
+                const b = interaction.bounds;
+                const c = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+                pp = rotatePoint(p, c, -rot);
+            }
+            applyResize(interaction, pp);
             requestRender();
             return;
         }
@@ -1538,6 +1975,8 @@
             commit();
         } else if (kind === "resize") {
             commit();
+        } else if (kind === "rotate") {
+            commit();
         }
 
         interaction = null;
@@ -1559,8 +1998,16 @@
 
     function focusTextEditor() {
         syncUI();
+        // Make sure the Text section is visible in the (scrollable) panel,
+        // then focus the content field so typing starts immediately.
+        textContent.scrollIntoView({ block: "nearest" });
         textContent.focus();
         textContent.select();
+        // Defer once more so a canvas pointer event can't steal focus back.
+        requestAnimationFrame(function () {
+            textContent.focus();
+            textContent.select();
+        });
     }
 
     function sampleColorAt(p) {
@@ -1591,6 +2038,15 @@
         } catch (err) {
             state.textPresets = [];
         }
+        try {
+            const def = localStorage.getItem(DEFAULT_PRESET_STORAGE_KEY);
+            state.defaultPresetId = def || null;
+        } catch (err) {
+            state.defaultPresetId = null;
+        }
+        if (state.defaultPresetId && !state.textPresets.some((p) => p.id === state.defaultPresetId)) {
+            state.defaultPresetId = null;
+        }
     }
 
     function persistPresets() {
@@ -1598,6 +2054,18 @@
             localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(state.textPresets));
         } catch (err) {
             toast("Could not save presets", "error");
+        }
+    }
+
+    function persistDefaultPreset() {
+        try {
+            if (state.defaultPresetId) {
+                localStorage.setItem(DEFAULT_PRESET_STORAGE_KEY, state.defaultPresetId);
+            } else {
+                localStorage.removeItem(DEFAULT_PRESET_STORAGE_KEY);
+            }
+        } catch (err) {
+            toast("Could not save default preset", "error");
         }
     }
 
@@ -1613,7 +2081,7 @@
         state.textPresets.forEach((p) => {
             const opt = document.createElement("option");
             opt.value = p.id;
-            opt.textContent = p.name;
+            opt.textContent = p.id === state.defaultPresetId ? p.name + " (default)" : p.name;
             presetSelect.appendChild(opt);
         });
     }
@@ -1631,12 +2099,17 @@
             fontFamily: obj.fontFamily,
             maxFontSize: obj.maxFontSize || obj.fontSize,
             align: obj.align,
+            direction: obj.direction || DEFAULT_TEXT_DIRECTION,
             color: obj.color,
             outlineColor: obj.outlineColor,
             outlineWidth: obj.outlineWidth,
             outlineEnabled: obj.outlineEnabled
         };
         state.textPresets.push(preset);
+        if (!state.defaultPresetId) {
+            state.defaultPresetId = preset.id;
+            persistDefaultPreset();
+        }
         persistPresets();
         renderPresetOptions();
         presetSelect.value = preset.id;
@@ -1655,19 +2128,24 @@
             toast("No preset selected", "error");
             return;
         }
-        obj.fontFamily = preset.fontFamily;
-        obj.maxFontSize = preset.maxFontSize;
-        obj.fontSize = preset.maxFontSize;
-        obj.autoFit = true;
-        obj.align = preset.align;
-        obj.color = preset.color;
-        obj.outlineColor = preset.outlineColor;
-        obj.outlineWidth = preset.outlineWidth;
-        obj.outlineEnabled = preset.outlineEnabled;
+        applyTextPreset(obj, preset);
         commit();
         render();
         syncUI();
         toast('Applied "' + preset.name + '"');
+    }
+
+    function setDefaultPreset() {
+        const preset = state.textPresets.find((p) => p.id === presetSelect.value);
+        if (!preset) {
+            toast("No preset selected", "error");
+            return;
+        }
+        state.defaultPresetId = preset.id;
+        persistDefaultPreset();
+        renderPresetOptions();
+        presetSelect.value = preset.id;
+        toast('"' + preset.name + '" is now the default for new text');
     }
 
     function renameSelectedPreset() {
@@ -1696,6 +2174,10 @@
             return;
         }
         state.textPresets = state.textPresets.filter((p) => p !== preset);
+        if (state.defaultPresetId === preset.id) {
+            state.defaultPresetId = null;
+            persistDefaultPreset();
+        }
         persistPresets();
         renderPresetOptions();
         toast("Preset deleted");
@@ -1862,6 +2344,7 @@
         // Brush controls
         brushMode.addEventListener("change", function () {
             state.brush.mode = brushMode.value;
+            brushBlurField.classList.toggle("hidden", state.brush.mode !== "blur");
         });
         brushColor.addEventListener("input", function () {
             state.brush.color = brushColor.value;
@@ -1870,6 +2353,10 @@
         brushSize.addEventListener("input", function () {
             state.brush.size = parseInt(brushSize.value, 10) || 1;
             brushSizeValue.textContent = state.brush.size;
+        });
+        brushBlur.addEventListener("input", function () {
+            state.brush.blurRadius = parseInt(brushBlur.value, 10) || DEFAULT_BLUR_RADIUS;
+            brushBlurValue.textContent = state.brush.blurRadius;
         });
         btnCoverBg.addEventListener("click", function () {
             state.brush.color = state.background;
@@ -1939,10 +2426,14 @@
         textSize.addEventListener("input", function () {
             const obj = selectedTextObject();
             if (!obj) return;
-            obj.fontSize = parseInt(textSize.value, 10) || 8;
-            textSizeValue.textContent = Math.round(
-                getEffectiveFontSize(obj) * (obj.scaleY == null ? 1 : obj.scaleY)
-            );
+            const size = parseInt(textSize.value, 10) || 8;
+            if (obj.autoFit) {
+                obj.maxFontSize = clamp(size, 8, 400);
+            } else {
+                obj.fontSize = clamp(size, 8, 400);
+                obj.scaleY = 1;
+            }
+            updateTextSizeUI(obj);
             requestRender();
         });
         textSize.addEventListener("change", function () {
@@ -1969,6 +2460,16 @@
             const obj = selectedTextObject();
             if (!obj) return;
             obj.align = btn.dataset.align;
+            commit();
+            render();
+            syncUI();
+        });
+        textDirectionEl.addEventListener("click", function (event) {
+            const btn = event.target.closest("button");
+            if (!btn) return;
+            const obj = selectedTextObject();
+            if (!obj) return;
+            obj.direction = btn.dataset.dir === "ltr" ? "ltr" : "rtl";
             commit();
             render();
             syncUI();
@@ -2014,6 +2515,30 @@
         presetSave.addEventListener("click", saveCurrentAsPreset);
         presetRename.addEventListener("click", renameSelectedPreset);
         presetDelete.addEventListener("click", deleteSelectedPreset);
+        presetSetDefault.addEventListener("click", setDefaultPreset);
+
+        // Rotation
+        rotationRange.addEventListener("input", function () {
+            setSelectedRotation(parseFloat(rotationRange.value) || 0);
+        });
+        rotationRange.addEventListener("change", function () {
+            if (getSelectedObject()) {
+                commit();
+                render();
+            }
+        });
+        rotationInput.addEventListener("change", function () {
+            if (!getSelectedObject()) return;
+            setSelectedRotation(parseFloat(rotationInput.value) || 0);
+            commit();
+            render();
+        });
+        rotationReset.addEventListener("click", function () {
+            if (!getSelectedObject()) return;
+            setSelectedRotation(0);
+            commit();
+            render();
+        });
 
         // Image layer properties
         imageOpacity.addEventListener("input", function () {
@@ -2064,6 +2589,33 @@
         shapeRadius.addEventListener("change", function () {
             const obj = getSelectedObject();
             if (obj && obj.type === "rect") commit();
+        });
+        shapeModeEl.addEventListener("click", function (event) {
+            const btn = event.target.closest("button");
+            if (!btn) return;
+            const mode = btn.dataset.mode || "fill";
+            state.currentShapeMode = mode;
+            const obj = getSelectedObject();
+            if (obj && (obj.type === "rect" || obj.type === "ellipse")) {
+                obj.mode = mode;
+                commit();
+                render();
+            }
+            syncUI();
+        });
+        shapeBlur.addEventListener("input", function () {
+            const radius = parseInt(shapeBlur.value, 10) || DEFAULT_BLUR_RADIUS;
+            state.currentShapeBlur = radius;
+            shapeBlurValue.textContent = radius;
+            const obj = getSelectedObject();
+            if (obj && (obj.type === "rect" || obj.type === "ellipse")) {
+                obj.blurRadius = radius;
+                requestRender();
+            }
+        });
+        shapeBlur.addEventListener("change", function () {
+            const obj = getSelectedObject();
+            if (obj && (obj.type === "rect" || obj.type === "ellipse")) commit();
         });
 
         // Zoom

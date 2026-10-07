@@ -147,6 +147,14 @@ body {
     background: #3a2226;
 }
 
+#prop-order .btn {
+    padding: 8px 12px;
+}
+
+#prop-order .row.gap + .row.gap {
+    margin-top: 8px;
+}
+
 .link-btn {
     background: none;
     border: none;
