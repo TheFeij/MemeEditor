@@ -21,12 +21,10 @@ jobs:
             platform: linux/amd64
             tags: webkit2_41
             artifact: MemeEditor-linux-amd64
-            binary: MemeEditor
           - os: windows-latest
             platform: windows/amd64
             tags: ""
             artifact: MemeEditor-windows-amd64
-            binary: MemeEditor.exe
     steps:
       - uses: actions/checkout@v4
 
@@ -53,15 +51,27 @@ jobs:
             wails build -platform "${{ matrix.platform }}"
           fi
 
+      - name: Add drop-in fonts folder
+        shell: bash
+        run: |
+          mkdir -p build/bin/fonts
+          {
+            echo "Custom fonts"
+            echo "============"
+            echo ""
+            echo "Drop your own font files (.ttf / .otf / .woff / .woff2) into this folder,"
+            echo "then restart MemeEditor. They will show up in the app's font list."
+          } > build/bin/fonts/README.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: build/bin/${{ matrix.binary }}
+          path: build/bin/
           if-no-files-found: error
 
   release:
-    name: Publish release
+    name: Package & publish release
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -70,11 +80,13 @@ jobs:
         with:
           path: artifacts
 
-      - name: Prepare assets
+      - name: Package zips
         run: |
           mkdir -p dist
-          cp artifacts/MemeEditor-linux-amd64/MemeEditor dist/MemeEditor-linux-amd64
-          cp artifacts/MemeEditor-windows-amd64/MemeEditor.exe dist/MemeEditor-windows-amd64.exe
+          for dir in artifacts/*/; do
+            name="$(basename "$dir")"
+            (cd "$dir" && zip -r "../../dist/${name}.zip" .)
+          done
           ls -la dist
 
       - name: Create release
@@ -82,5 +94,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes \
-            || gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release create "$tag" dist/*.zip --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes \
+            || gh release upload "$tag" dist/*.zip --repo "$GITHUB_REPOSITORY" --clobber

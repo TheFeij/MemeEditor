@@ -37,6 +37,8 @@
     ];
 
     const DEFAULT_CANVAS = { width: 800, height: 600 };
+    // Neutral slate that suits the dark UI (was pure white).
+    const DEFAULT_BACKGROUND = "#232733";
     const MAX_HISTORY = 120;
     const PRESET_STORAGE_KEY = "memeEditor.textPresets";
     const DEFAULT_PRESET_STORAGE_KEY = "memeEditor.defaultTextPreset";
@@ -44,7 +46,6 @@
     // embedded English words, so RTL (which still renders Latin runs correctly)
     // is the default until the user changes it.
     const DEFAULT_TEXT_DIRECTION = "rtl";
-    const DEFAULT_SHAPE_FILL = "#ff0000";
     const DEFAULT_RECT_RADIUS = 12;
     const DEFAULT_BLUR_RADIUS = 16;
 
@@ -82,18 +83,19 @@
     const state = {
         baseImage: { source: null, width: 0, height: 0 },
         padding: { top: 0, right: 0, bottom: 0, left: 0 },
-        background: "#ffffff",
+        background: DEFAULT_BACKGROUND,
         objects: [],
         selectedObjectId: null,
         activeTool: "select",
         brush: { mode: "draw", color: "#000000", size: 10, blurRadius: DEFAULT_BLUR_RADIUS },
         currentColor: "#000000",
-        currentShapeFill: DEFAULT_SHAPE_FILL,
+        currentShapeFill: DEFAULT_BACKGROUND,
         currentShapeMode: "fill",
         currentShapeBlur: DEFAULT_BLUR_RADIUS,
         logoImage: null,
         textPresets: [],
-        defaultPresetId: null
+        defaultPresetId: null,
+        started: false
     };
 
     let history = [];
@@ -156,6 +158,13 @@
     const bgWhite = $("bg-white");
     const bgBlack = $("bg-black");
     const bgColor = $("bg-color");
+
+    const startOverlay = $("start-overlay");
+    const startOpen = $("start-open");
+    const startEmpty = $("start-empty");
+    const startWidth = $("start-width");
+    const startHeight = $("start-height");
+    const startBg = $("start-bg");
 
     const propEmpty = $("prop-empty");
     const propText = $("prop-text");
@@ -237,7 +246,14 @@
     const btnSave = $("btn-save");
     const btnUndo = $("btn-undo");
     const btnRedo = $("btn-redo");
+    const btnRestart = $("btn-restart");
     const emptyOpen = $("empty-open");
+
+    const confirmOverlay = $("confirm-overlay");
+    const confirmTitle = $("confirm-title");
+    const confirmMessage = $("confirm-message");
+    const confirmYes = $("confirm-yes");
+    const confirmCancel = $("confirm-cancel");
 
     // ---------------------------------------------------------------------
     // Utilities
@@ -249,6 +265,11 @@
 
     function clamp(v, min, max) {
         return Math.min(max, Math.max(min, v));
+    }
+
+    // Keep sizes/timings readable: at most two decimal places.
+    function round2(v) {
+        return Math.round(v * 100) / 100;
     }
 
     function rgbToHex(r, g, b) {
@@ -338,7 +359,7 @@
 
     function computeDocumentSize() {
         const img = state.baseImage;
-        if (!img.source || !img.width || !img.height) {
+        if (!img.width || !img.height) {
             return { width: DEFAULT_CANVAS.width, height: DEFAULT_CANVAS.height, left: 0, top: 0 };
         }
         const left = Math.round((img.width * state.padding.left) / 100);
@@ -751,6 +772,13 @@
         return c;
     }
 
+    // Cache of Go-computed blur bitmaps, keyed by object id. Each entry is
+    // { key, bitmap, pendingKey, failedKey }. `contentRev` is bumped whenever
+    // the document content changes so stale blurs are recomputed.
+    const blurCache = new Map();
+    let contentRev = 0;
+    let exporting = false;
+
     function deviceScaleOf(ctx) {
         const t = ctx.getTransform();
         return Math.hypot(t.a, t.b) || 1;
@@ -805,10 +833,10 @@
         }
     }
 
-    // Blur the background (everything beneath this object) inside its shape.
-    // Uses a real pixel blur instead of ctx.filter, which is not available in
-    // some embedded webviews (e.g. WebKitGTK used by Wails on Linux).
-    function renderBlurFill(ctx, obj) {
+    // Compute the device-space region a blur object must sample, plus the
+    // device-space blur radius. Must be called while the object's rotation
+    // transform is active (as renderObject does).
+    function blurRegionInfo(ctx, obj) {
         const radius = Math.max(1, obj.blurRadius || DEFAULT_BLUR_RADIUS);
         const scale = deviceScaleOf(ctx);
         const canvas = ctx.canvas;
@@ -844,35 +872,151 @@
         const y1 = clamp(Math.ceil(maxY + pad), 0, canvas.height);
         const rw = x1 - x0;
         const rh = y1 - y0;
-        if (rw < 1 || rh < 1) return;
+        if (rw < 1 || rh < 1) return null;
+        return { x0: x0, y0: y0, rw: rw, rh: rh, rDev: rDev };
+    }
 
-        const img = (function () {
-            try {
-                return ctx.getImageData(x0, y0, rw, rh);
-            } catch (err) {
-                return null;
-            }
-        })();
-        if (!img) return;
-        // ~radius*scale total spread, approximated with three box passes.
-        const passR = Math.max(1, Math.round(rDev / 3));
-        for (let i = 0; i < 3; i++) {
-            boxBlurPass(img.data, rw, rh, passR, true);
-            boxBlurPass(img.data, rw, rh, passR, false);
-        }
-
-        const blur = getScratch("b", rw, rh);
-        blur.getContext("2d").putImageData(img, 0, 0);
-
+    // Draw a (possibly blurred) bitmap back inside the object's silhouette.
+    function drawBlurBitmap(ctx, obj, bitmap, info) {
         ctx.save();
         ctx.beginPath();
         objectPath(ctx, obj);
         ctx.clip();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.drawImage(blur, x0, y0);
+        ctx.drawImage(bitmap, info.x0, info.y0);
         ctx.restore();
     }
 
+    // Synchronous fallback used without the Go backend (browser preview and
+    // PNG export), matching the original JS implementation.
+    function jsBlurFill(ctx, obj, info) {
+        const img = (function () {
+            try {
+                return ctx.getImageData(info.x0, info.y0, info.rw, info.rh);
+            } catch (err) {
+                return null;
+            }
+        })();
+        if (!img) return;
+        const passR = Math.max(1, Math.round(info.rDev / 3));
+        for (let i = 0; i < 3; i++) {
+            boxBlurPass(img.data, info.rw, info.rh, passR, true);
+            boxBlurPass(img.data, info.rw, info.rh, passR, false);
+        }
+        const blur = getScratch("b", info.rw, info.rh);
+        blur.getContext("2d").putImageData(img, 0, 0);
+        drawBlurBitmap(ctx, obj, blur, info);
+    }
+
+    // Blur the background (everything beneath this object) inside its shape.
+    // The heavy pixel work runs in the Go backend so the UI thread stays
+    // responsive; results are cached per object and recomputed only when the
+    // content, geometry or blur radius changes.
+    function renderBlurFill(ctx, obj) {
+        const info = blurRegionInfo(ctx, obj);
+        if (!info) return;
+
+        if (!hasBackend() || exporting) {
+            jsBlurFill(ctx, obj, info);
+            return;
+        }
+
+        const key =
+            contentRev + "|" + info.x0 + "," + info.y0 + "," + info.rw + "," + info.rh + "|" + info.rDev;
+        const entry = blurCache.get(obj.id);
+        if (entry && entry.key === key && entry.bitmap) {
+            drawBlurBitmap(ctx, obj, entry.bitmap, info);
+            return;
+        }
+        if (entry && entry.failedKey === key) {
+            // Go failed for this revision: fall back so the blur still shows.
+            jsBlurFill(ctx, obj, info);
+            return;
+        }
+        // Same region but content changed: show the previous blur until the
+        // refreshed one arrives, so the preview doesn't flicker during edits.
+        if (entry && entry.bitmap && sameRegion(entry.region, info)) {
+            drawBlurBitmap(ctx, obj, entry.bitmap, info);
+        }
+        // (Re)compute. During an active drag/draw we throttle so we don't flood
+        // the backend, but still give progressive feedback.
+        const throttle = interaction ? 100 : 0;
+        const lastRequest = entry ? entry.lastRequest || 0 : 0;
+        if ((!entry || entry.pendingKey !== key) && Date.now() - lastRequest >= throttle) {
+            requestBlurBitmap(ctx, obj, key, info);
+        }
+    }
+
+    function sameRegion(a, b) {
+        return (
+            a &&
+            b &&
+            a.x0 === b.x0 &&
+            a.y0 === b.y0 &&
+            a.rw === b.rw &&
+            a.rh === b.rh &&
+            a.rDev === b.rDev
+        );
+    }
+
+    function requestBlurBitmap(ctx, obj, key, info) {
+        const entry = blurCache.get(obj.id) || {};
+        entry.pendingKey = key;
+        entry.region = info;
+        entry.lastRequest = Date.now();
+        blurCache.set(obj.id, entry);
+
+        // Everything beneath this object is already drawn in the canvas now.
+        const off = document.createElement("canvas");
+        off.width = info.rw;
+        off.height = info.rh;
+        off.getContext("2d").drawImage(
+            ctx.canvas,
+            info.x0,
+            info.y0,
+            info.rw,
+            info.rh,
+            0,
+            0,
+            info.rw,
+            info.rh
+        );
+        const dataURL = off.toDataURL("image/jpeg", 0.9);
+
+        window.go.main.App.BlurPNG(dataURL, info.rDev)
+            .then(function (result) {
+                const img = new Image();
+                img.onload = function () {
+                    // Ignore results that a newer request has superseded.
+                    const current = blurCache.get(obj.id);
+                    if (!current || current.pendingKey !== key) return;
+                    const bitmap = document.createElement("canvas");
+                    bitmap.width = info.rw;
+                    bitmap.height = info.rh;
+                    bitmap.getContext("2d").drawImage(img, 0, 0);
+                    blurCache.set(obj.id, {
+                        key: key,
+                        bitmap: bitmap,
+                        pendingKey: key,
+                        region: info,
+                        lastRequest: current.lastRequest
+                    });
+                    requestRender();
+                };
+                img.onerror = function () {
+                    const current = blurCache.get(obj.id);
+                    if (!current || current.pendingKey !== key) return;
+                    blurCache.set(obj.id, { pendingKey: key, failedKey: key, region: info });
+                };
+                img.src = result;
+            })
+            .catch(function () {
+                const e = blurCache.get(obj.id) || {};
+                e.pendingKey = key;
+                e.failedKey = key;
+                blurCache.set(obj.id, e);
+            });
+    }
 
     function renderText(ctx, obj) {
         const m = getTextMetrics(obj);
@@ -977,6 +1121,11 @@
     }
 
     function renderDocument(ctx) {
+        if (blurCache.size) {
+            for (const id of blurCache.keys()) {
+                if (!state.objects.some((o) => o.id === id)) blurCache.delete(id);
+            }
+        }
         const size = computeDocumentSize();
         ctx.clearRect(0, 0, size.width, size.height);
         ctx.fillStyle = state.background;
@@ -1240,9 +1389,8 @@
     }
 
     function updateEmptyState() {
-        const hasImage = !!state.baseImage.source;
-        emptyState.classList.toggle("hidden", hasImage);
-        btnReplace.disabled = !hasImage;
+        emptyState.classList.toggle("hidden", state.started);
+        btnReplace.disabled = !state.started;
     }
 
     // ---------------------------------------------------------------------
@@ -1285,6 +1433,7 @@
         state.brush = Object.assign({}, snap.brush);
         state.currentColor = snap.currentColor;
         state.currentShapeFill = snap.currentShapeFill;
+        contentRev++;
         render();
         syncUI();
     }
@@ -1296,6 +1445,7 @@
     }
 
     function commit() {
+        contentRev++;
         history = history.slice(0, historyIndex + 1);
         history.push(cloneState());
         if (history.length > MAX_HISTORY) {
@@ -1397,10 +1547,113 @@
             height: img.naturalHeight
         };
         state.selectedObjectId = null;
+        markStarted();
         commit();
         render();
         syncUI();
         toast("Base image loaded");
+    }
+
+    // ---------------------------------------------------------------------
+    // Project start / lock
+    // ---------------------------------------------------------------------
+
+    function setAppLocked(locked) {
+        document.body.classList.toggle("locked", locked);
+        if (toolsEl) {
+            toolsEl.querySelectorAll(".tool").forEach(function (btn) {
+                btn.disabled = locked;
+            });
+        }
+        startOverlay.classList.toggle("hidden", !locked);
+    }
+
+    function markStarted() {
+        if (state.started) return;
+        state.started = true;
+        setAppLocked(false);
+    }
+
+    function startEmptyCanvas() {
+        const w = clamp(parseInt(startWidth.value, 10) || DEFAULT_CANVAS.width, 1, 10000);
+        const h = clamp(parseInt(startHeight.value, 10) || DEFAULT_CANVAS.height, 1, 10000);
+        state.baseImage = { source: null, width: w, height: h };
+        state.background = hexToRgb(startBg.value) ? startBg.value : DEFAULT_BACKGROUND;
+        state.currentShapeFill = state.background;
+        bgColor.value = state.background;
+        state.selectedObjectId = null;
+        markStarted();
+        commit();
+        render();
+        syncUI();
+        toast("Empty canvas created · " + w + " × " + h);
+    }
+
+    // ---------------------------------------------------------------------
+    // Confirmation dialog + restart
+    // ---------------------------------------------------------------------
+
+    let confirmAction = null;
+
+    function showConfirm(title, message, confirmLabel, onConfirm) {
+        confirmTitle.textContent = title;
+        confirmMessage.textContent = message;
+        confirmYes.textContent = confirmLabel;
+        confirmAction = onConfirm;
+        confirmOverlay.classList.remove("hidden");
+    }
+
+    function closeConfirm() {
+        confirmOverlay.classList.add("hidden");
+        confirmAction = null;
+    }
+
+    // Throw everything away and return to the start screen.
+    function resetProject() {
+        state.baseImage = { source: null, width: 0, height: 0 };
+        state.padding = { top: 0, right: 0, bottom: 0, left: 0 };
+        state.background = DEFAULT_BACKGROUND;
+        state.objects = [];
+        state.selectedObjectId = null;
+        state.activeTool = "select";
+        state.brush = { mode: "draw", color: "#000000", size: 10, blurRadius: DEFAULT_BLUR_RADIUS };
+        state.currentColor = "#000000";
+        state.currentShapeFill = DEFAULT_BACKGROUND;
+        state.currentShapeMode = "fill";
+        state.currentShapeBlur = DEFAULT_BLUR_RADIUS;
+        state.started = false;
+
+        history = [];
+        historyIndex = -1;
+        crop = null;
+        imageCrop = null;
+        interaction = null;
+        zoom = 1;
+        blurCache.clear();
+
+        padTop.value = 0;
+        padRight.value = 0;
+        padBottom.value = 0;
+        padLeft.value = 0;
+        brushMode.value = "draw";
+        brushColor.value = "#000000";
+        brushSize.value = 10;
+        brushSizeValue.textContent = "10";
+        brushBlur.value = DEFAULT_BLUR_RADIUS;
+        brushBlurValue.textContent = DEFAULT_BLUR_RADIUS;
+        brushBlurField.classList.add("hidden");
+        bgColor.value = DEFAULT_BACKGROUND;
+        shapeFill.value = DEFAULT_BACKGROUND;
+        startWidth.value = DEFAULT_CANVAS.width;
+        startHeight.value = DEFAULT_CANVAS.height;
+        startBg.value = DEFAULT_BACKGROUND;
+
+        setActiveTool("select");
+        commit();
+        render();
+        syncUI();
+        setAppLocked(true);
+        toast("Project reset");
     }
 
     function addImageLayer(img) {
@@ -1515,9 +1768,12 @@
 
     function normalizeFontEntry(entry) {
         const file = typeof entry === "string" ? entry : entry && entry.file;
-        if (!file || !FONT_EXT_RE.test(file)) return null;
+        const explicitUrl = entry && entry.url;
+        if (!explicitUrl && (!file || !FONT_EXT_RE.test(file))) return null;
         let url;
-        if (/^(https?:)?\/\//i.test(file) || file.charAt(0) === "/") {
+        if (explicitUrl) {
+            url = explicitUrl;
+        } else if (/^(https?:)?\/\//i.test(file) || file.charAt(0) === "/") {
             url = file;
         } else if (file.indexOf(FONT_DIR) === 0) {
             url = file;
@@ -1525,7 +1781,7 @@
             url = FONT_DIR + file.replace(/^\.\//, "");
         }
         return {
-            family: (entry && entry.family) || deriveFontFamily(file),
+            family: (entry && entry.family) || deriveFontFamily(file || "Font"),
             url: url,
             weight: (entry && entry.weight) || "normal",
             style: (entry && entry.style) || "normal"
@@ -1574,6 +1830,19 @@
 
     async function discoverFonts() {
         const entries = [];
+
+        // Fonts the user dropped into a "fonts" folder next to the executable.
+        if (hasBackend() && window.go.main.App.ListUserFonts) {
+            try {
+                const userFonts = await window.go.main.App.ListUserFonts();
+                for (const f of userFonts || []) {
+                    if (f && f.dataUrl) entries.push({ family: f.family, url: f.dataUrl });
+                }
+            } catch (err) {
+                /* no user fonts */
+            }
+        }
+
         try {
             const res = await fetch(FONT_MANIFEST, { cache: "no-store" });
             if (res.ok) {
@@ -1707,7 +1976,7 @@
     }
 
     function textDisplaySize(obj) {
-        return Math.round(getEffectiveFontSize(obj) * (obj.scaleY == null ? 1 : obj.scaleY));
+        return round2(getEffectiveFontSize(obj) * (obj.scaleY == null ? 1 : obj.scaleY));
     }
 
     function updateTextSizeUI(obj) {
@@ -1774,7 +2043,7 @@
             updateTextSizeUI(obj);
             textSize.disabled = !!obj.autoFit;
             textAutoFit.checked = !!obj.autoFit;
-            textMaxSize.value = obj.maxFontSize;
+            textMaxSize.value = round2(obj.maxFontSize);
             textMaxSize.disabled = !obj.autoFit;
             textColor.value = obj.color;
             textOutlineEnabled.checked = !!obj.outlineEnabled;
@@ -1836,6 +2105,9 @@
         }
 
         updateEmptyState();
+        refreshRangeFills();
+        syncCustomSelects();
+        syncCustomColors();
     }
 
     // ---------------------------------------------------------------------
@@ -2048,10 +2320,10 @@
             const tY = nh / baseH;
             if (obj.autoFit) {
                 const startMax = inter.original.maxFontSize || obj.maxFontSize || obj.fontSize;
-                obj.maxFontSize = clamp(startMax * tY, 8, 400);
+                obj.maxFontSize = clamp(round2(startMax * tY), 8, 400);
             } else {
                 const startSize = inter.original.fontSize || obj.fontSize;
-                obj.fontSize = clamp(startSize * tY, 8, 400);
+                obj.fontSize = clamp(round2(startSize * tY), 8, 400);
             }
             obj.scaleY = 1;
             obj.scaleX = clamp(nw / (baseW * tY), 0.05, 50);
@@ -2096,6 +2368,8 @@
             return;
         }
         const p = getDocPoint(event);
+        // Any live edit can change the content a blur object samples from.
+        contentRev++;
 
         if (interaction.kind === "brush") {
             interaction.object.points.push({ x: p.x, y: p.y });
@@ -2419,7 +2693,14 @@
         off.height = Math.max(1, Math.round(size.height * scale));
         const octx = off.getContext("2d");
         octx.setTransform(scale, 0, 0, scale, 0, 0);
-        renderDocument(octx);
+        // Export renders synchronously on an offscreen canvas, so use the
+        // in-JS blur there; the Go blur is for the interactive preview.
+        exporting = true;
+        try {
+            renderDocument(octx);
+        } finally {
+            exporting = false;
+        }
 
         off.toBlob(function (blob) {
             if (!blob) {
@@ -2674,11 +2955,19 @@
             setBackground("#000000");
         });
         bgColor.addEventListener("input", function () {
+            const old = state.background;
             state.background = bgColor.value;
+            if (state.currentShapeFill === old || !state.currentShapeFill) {
+                state.currentShapeFill = bgColor.value;
+            }
             requestRender();
         });
         bgColor.addEventListener("change", function () {
+            const old = state.background;
             state.background = bgColor.value;
+            if (state.currentShapeFill === old || !state.currentShapeFill) {
+                state.currentShapeFill = bgColor.value;
+            }
             commit();
             render();
         });
@@ -2730,9 +3019,10 @@
         textMaxSize.addEventListener("change", function () {
             const obj = selectedTextObject();
             if (!obj) return;
-            obj.maxFontSize = parseInt(textMaxSize.value, 10) || obj.fontSize;
+            obj.maxFontSize = clamp(round2(parseFloat(textMaxSize.value) || obj.fontSize), 8, 400);
             commit();
             render();
+            syncUI();
         });
         textAlignEl.addEventListener("click", function (event) {
             const btn = event.target.closest("button");
@@ -2957,6 +3247,29 @@
         btnUndo.addEventListener("click", undo);
         btnRedo.addEventListener("click", redo);
 
+        // Start screen
+        startOpen.addEventListener("click", () => fileInput.click());
+        startEmpty.addEventListener("click", startEmptyCanvas);
+
+        // Restart + confirmation dialog
+        btnRestart.addEventListener("click", function () {
+            showConfirm(
+                "Restart project?",
+                "This discards your image and every edit, and returns to the start screen. This cannot be undone.",
+                "Restart",
+                resetProject
+            );
+        });
+        confirmCancel.addEventListener("click", closeConfirm);
+        confirmYes.addEventListener("click", function () {
+            const fn = confirmAction;
+            closeConfirm();
+            if (fn) fn();
+        });
+        confirmOverlay.addEventListener("click", function (e) {
+            if (e.target === confirmOverlay) closeConfirm();
+        });
+
         fileInput.addEventListener("change", function (e) {
             loadImageFile(e.target.files[0], "auto");
             e.target.value = "";
@@ -3021,6 +3334,7 @@
         // Keyboard shortcuts
         window.addEventListener("keydown", function (e) {
             if (isEditingTarget(e.target)) return;
+            if (!state.started) return;
             const mod = e.ctrlKey || e.metaKey;
             const key = e.key.toLowerCase();
 
@@ -3038,6 +3352,10 @@
             if (mod) return;
 
             if (key === "escape") {
+                if (!confirmOverlay.classList.contains("hidden")) {
+                    closeConfirm();
+                    return;
+                }
                 if (imageCrop) cancelImageCrop();
                 else if (state.activeTool === "crop") cancelCrop();
                 return;
@@ -3099,10 +3417,513 @@
     }
 
     function setBackground(color) {
+        const old = state.background;
         state.background = color;
+        // New shapes default to the background color unless the user has
+        // already picked a custom shape fill.
+        if (state.currentShapeFill === old || !state.currentShapeFill) {
+            state.currentShapeFill = color;
+        }
         bgColor.value = color;
         commit();
         render();
+    }
+
+    // ---------------------------------------------------------------------
+    // Input polish (themed range sliders + number steppers)
+    // ---------------------------------------------------------------------
+
+    function updateRangeFill(input) {
+        const min = parseFloat(input.min);
+        const max = parseFloat(input.max);
+        const v = parseFloat(input.value);
+        const lo = isNaN(min) ? 0 : min;
+        const hi = isNaN(max) ? 100 : max;
+        const pct = hi > lo ? ((v - lo) / (hi - lo)) * 100 : 0;
+        input.style.setProperty("--range-progress", clamp(pct, 0, 100) + "%");
+    }
+
+    function refreshRangeFills() {
+        document.querySelectorAll('input[type="range"]').forEach(updateRangeFill);
+    }
+
+    function enhanceRanges() {
+        document.querySelectorAll('input[type="range"]').forEach(function (input) {
+            if (input.dataset.rangeEnhanced) return;
+            input.dataset.rangeEnhanced = "1";
+            updateRangeFill(input);
+            input.addEventListener("input", function () {
+                updateRangeFill(input);
+            });
+        });
+    }
+
+    function enhanceNumberInputs() {
+        document.querySelectorAll('input[type="number"]').forEach(function (input) {
+            if (input.dataset.stepped) return;
+            input.dataset.stepped = "1";
+
+            const wrap = document.createElement("div");
+            wrap.className = "num-input";
+            input.parentNode.insertBefore(wrap, input);
+
+            const dec = document.createElement("button");
+            dec.type = "button";
+            dec.className = "num-btn";
+            dec.tabIndex = -1;
+            dec.setAttribute("aria-label", "Decrease");
+            dec.textContent = "−";
+
+            const inc = document.createElement("button");
+            inc.type = "button";
+            inc.className = "num-btn";
+            inc.tabIndex = -1;
+            inc.setAttribute("aria-label", "Increase");
+            inc.textContent = "+";
+
+            wrap.appendChild(dec);
+            wrap.appendChild(input);
+            wrap.appendChild(inc);
+
+            const stepBy = function (dir) {
+                const step = parseFloat(input.step) || 1;
+                const min = input.min !== "" ? parseFloat(input.min) : -Infinity;
+                const max = input.max !== "" ? parseFloat(input.max) : Infinity;
+                let v = parseFloat(input.value);
+                if (isNaN(v)) v = 0;
+                v = clamp(v + dir * step, min, max);
+                input.value = String(v);
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                input.dispatchEvent(new Event("change", { bubbles: true }));
+            };
+            dec.addEventListener("click", function () {
+                stepBy(-1);
+            });
+            inc.addEventListener("click", function () {
+                stepBy(1);
+            });
+        });
+    }
+
+    // ---------------------------------------------------------------------
+    // Custom dropdown (native <option> lists can't be themed)
+    // ---------------------------------------------------------------------
+
+    const customSelects = new Map();
+
+    function closeAllDropdowns() {
+        customSelects.forEach(function (state) {
+            state.wrap.classList.remove("open");
+        });
+    }
+
+    function syncDropdown(select) {
+        const state = customSelects.get(select);
+        if (!state) return;
+        const opt = select.selectedIndex >= 0 ? select.options[select.selectedIndex] : null;
+        state.label.textContent = opt ? opt.textContent : "";
+        state.label.title = opt ? opt.textContent : "";
+        state.toggle.disabled = select.disabled;
+        state.wrap.classList.toggle("disabled", select.disabled);
+        Array.prototype.forEach.call(state.menu.children, function (item) {
+            item.classList.toggle("selected", item.dataset.value === select.value);
+        });
+    }
+
+    function syncCustomSelects() {
+        customSelects.forEach(function (state, select) {
+            syncDropdown(select);
+        });
+    }
+
+    function enhanceSelect(select) {
+        if (customSelects.has(select)) return;
+
+        const wrap = document.createElement("div");
+        wrap.className = "dropdown";
+        select.parentNode.insertBefore(wrap, select);
+        wrap.appendChild(select);
+        select.classList.add("dropdown-native");
+
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "dropdown-toggle";
+        const label = document.createElement("span");
+        label.className = "dropdown-label";
+        const chevron = document.createElement("span");
+        chevron.className = "dropdown-chevron";
+        toggle.appendChild(label);
+        toggle.appendChild(chevron);
+
+        const menu = document.createElement("div");
+        menu.className = "dropdown-menu";
+        wrap.appendChild(toggle);
+        wrap.appendChild(menu);
+
+        const state = { wrap: wrap, toggle: toggle, menu: menu, label: label };
+        customSelects.set(select, state);
+
+        function rebuild() {
+            menu.innerHTML = "";
+            const isFont = select.id === "text-font";
+            Array.prototype.forEach.call(select.options, function (opt) {
+                const item = document.createElement("button");
+                item.type = "button";
+                item.className = "dropdown-option";
+                item.textContent = opt.textContent;
+                item.dataset.value = opt.value;
+                if (isFont) {
+                    item.style.fontFamily = '"' + String(opt.value).replace(/"/g, "") + '", ' + FONT_FALLBACK;
+                }
+                if (opt.value === select.value) item.classList.add("selected");
+                item.addEventListener("click", function (ev) {
+                    ev.stopPropagation();
+                    select.value = opt.value;
+                    select.dispatchEvent(new Event("change", { bubbles: true }));
+                    syncDropdown(select);
+                    closeAllDropdowns();
+                });
+                menu.appendChild(item);
+            });
+        }
+
+        function positionMenu() {
+            const r = toggle.getBoundingClientRect();
+            menu.style.left = r.left + "px";
+            menu.style.width = r.width + "px";
+            menu.style.top = r.bottom + 6 + "px";
+            const h = menu.offsetHeight;
+            if (r.bottom + 6 + h > window.innerHeight && r.top - 6 - h > 0) {
+                menu.style.top = r.top - 6 - h + "px";
+            }
+        }
+
+        toggle.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            const isOpen = wrap.classList.contains("open");
+            closeAllDropdowns();
+            if (isOpen) return;
+            rebuild();
+            positionMenu();
+            wrap.classList.add("open");
+        });
+
+        state.rebuild = rebuild;
+        state.position = positionMenu;
+        syncDropdown(select);
+    }
+
+    function enhanceSelects() {
+        document.querySelectorAll("select").forEach(enhanceSelect);
+    }
+
+    // ---------------------------------------------------------------------
+    // Custom color picker (native <input type=color> dialog can't be themed)
+    // ---------------------------------------------------------------------
+
+    const customColors = new Map();
+
+    function hsvToRgb(h, s, v) {
+        h = ((h % 360) + 360) % 360;
+        const c = v * s;
+        const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+        const m = v - c;
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        if (h < 60) {
+            r = c;
+            g = x;
+        } else if (h < 120) {
+            r = x;
+            g = c;
+        } else if (h < 180) {
+            g = c;
+            b = x;
+        } else if (h < 240) {
+            g = x;
+            b = c;
+        } else if (h < 300) {
+            r = x;
+            b = c;
+        } else {
+            r = c;
+            b = x;
+        }
+        return {
+            r: Math.round((r + m) * 255),
+            g: Math.round((g + m) * 255),
+            b: Math.round((b + m) * 255)
+        };
+    }
+
+    function rgbToHsv(r, g, b) {
+        r /= 255;
+        g /= 255;
+        b /= 255;
+        const max = Math.max(r, g, b);
+        const min = Math.min(r, g, b);
+        const d = max - min;
+        let h = 0;
+        if (d) {
+            if (max === r) h = ((g - b) / d) % 6;
+            else if (max === g) h = (b - r) / d + 2;
+            else h = (r - g) / d + 4;
+            h *= 60;
+            if (h < 0) h += 360;
+        }
+        return { h: h, s: max === 0 ? 0 : d / max, v: max };
+    }
+
+    function hexToRgb(hex) {
+        if (!hex) return null;
+        let s = String(hex).trim().replace(/^#/, "");
+        if (s.length === 3) {
+            s = s
+                .split("")
+                .map(function (c) {
+                    return c + c;
+                })
+                .join("");
+        }
+        if (!/^[0-9a-fA-F]{6}$/.test(s)) return null;
+        return {
+            r: parseInt(s.slice(0, 2), 16),
+            g: parseInt(s.slice(2, 4), 16),
+            b: parseInt(s.slice(4, 6), 16)
+        };
+    }
+
+    function closeAllColorPickers() {
+        customColors.forEach(function (st) {
+            st.field.classList.remove("open");
+        });
+    }
+
+    function renderColorPopover(st) {
+        const h = st.hsv.h;
+        st.sv.style.background =
+            "linear-gradient(to top, #000, rgba(0,0,0,0)), linear-gradient(to right, #fff, hsl(" +
+            h +
+            ", 100%, 50%))";
+        st.svCursor.style.left = st.hsv.s * 100 + "%";
+        st.svCursor.style.top = (1 - st.hsv.v) * 100 + "%";
+        st.hueThumb.style.left = (h / 360) * 100 + "%";
+        st.hex.value = rgbToHex(st.rgb.r, st.rgb.g, st.rgb.b);
+        Array.prototype.forEach.call(st.swatches.children, function (btn) {
+            btn.classList.toggle(
+                "active",
+                btn.dataset.color.toLowerCase() === rgbToHex(st.rgb.r, st.rgb.g, st.rgb.b).toLowerCase()
+            );
+        });
+    }
+
+    function syncColorField(input) {
+        const st = customColors.get(input);
+        if (!st) return;
+        const rgb = hexToRgb(input.value) || { r: 0, g: 0, b: 0 };
+        st.rgb = rgb;
+        st.hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+        const hex = rgbToHex(rgb.r, rgb.g, rgb.b);
+        st.swatch.style.background = hex;
+        st.swatch.title = hex;
+        renderColorPopover(st);
+    }
+
+    function syncCustomColors() {
+        customColors.forEach(function (st, input) {
+            syncColorField(input);
+        });
+    }
+
+    function enhanceColorInput(input) {
+        if (customColors.has(input)) return;
+
+        const field = document.createElement("div");
+        field.className = "color-field";
+        input.parentNode.insertBefore(field, input);
+
+        const swatch = document.createElement("button");
+        swatch.type = "button";
+        swatch.className = "color-swatch";
+
+        const pop = document.createElement("div");
+        pop.className = "color-popover";
+
+        const sv = document.createElement("div");
+        sv.className = "cp-sv";
+        const svCursor = document.createElement("div");
+        svCursor.className = "cp-cursor";
+        sv.appendChild(svCursor);
+
+        const hue = document.createElement("div");
+        hue.className = "cp-hue";
+        const hueThumb = document.createElement("div");
+        hueThumb.className = "cp-hue-thumb";
+        hue.appendChild(hueThumb);
+
+        const row = document.createElement("div");
+        row.className = "cp-row";
+        const hex = document.createElement("input");
+        hex.type = "text";
+        hex.className = "cp-hex";
+        hex.maxLength = 7;
+        hex.spellcheck = false;
+        row.appendChild(hex);
+
+        const swatches = document.createElement("div");
+        swatches.className = "cp-swatches";
+        ["#ffffff", "#000000", "#ff0000", "#ff8c00", "#ffd400", "#22c55e", "#0ea5e9", "#6c8cff", "#a855f7", "#ec4899"].forEach(
+            function (c) {
+                const b = document.createElement("button");
+                b.type = "button";
+                b.className = "cp-swatch";
+                b.dataset.color = c;
+                b.style.background = c;
+                b.addEventListener("click", function (ev) {
+                    ev.stopPropagation();
+                    applyHex(c, false);
+                });
+                swatches.appendChild(b);
+            }
+        );
+
+        pop.appendChild(sv);
+        pop.appendChild(hue);
+        pop.appendChild(row);
+        pop.appendChild(swatches);
+
+        field.appendChild(swatch);
+        field.appendChild(input);
+        field.appendChild(pop);
+        input.classList.add("color-native");
+
+        const st = {
+            input: input,
+            field: field,
+            swatch: swatch,
+            pop: pop,
+            sv: sv,
+            svCursor: svCursor,
+            hue: hue,
+            hueThumb: hueThumb,
+            hex: hex,
+            swatches: swatches,
+            hsv: { h: 0, s: 0, v: 1 },
+            rgb: { r: 0, g: 0, b: 0 }
+        };
+        customColors.set(input, st);
+
+        function emit(live) {
+            input.value = rgbToHex(st.rgb.r, st.rgb.g, st.rgb.b);
+            swatch.style.background = input.value;
+            swatch.title = input.value;
+            renderColorPopover(st);
+            // Always fire "input" so the app applies the colour, then "change"
+            // to commit it to history when the interaction finishes.
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            if (!live) {
+                input.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+        }
+
+        function applyHsv(live) {
+            st.rgb = hsvToRgb(st.hsv.h, st.hsv.s, st.hsv.v);
+            emit(live);
+        }
+
+        function applyHex(value, live) {
+            const rgb = hexToRgb(value);
+            if (!rgb) return;
+            st.rgb = rgb;
+            st.hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+            emit(live);
+        }
+
+        st.applyHex = applyHex;
+
+        hex.addEventListener("input", function () {
+            const rgb = hexToRgb(hex.value);
+            if (!rgb) return;
+            st.rgb = rgb;
+            st.hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+            input.value = rgbToHex(rgb.r, rgb.g, rgb.b);
+            swatch.style.background = input.value;
+            renderColorPopover(st);
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+        });
+        hex.addEventListener("change", function () {
+            applyHex(hex.value, false);
+        });
+
+        function drag(el, onMove, onDone) {
+            el.addEventListener("pointerdown", function (e) {
+                e.stopPropagation();
+                try {
+                    el.setPointerCapture(e.pointerId);
+                } catch (err) {
+                    /* best effort */
+                }
+                onMove(e);
+                applyHsv(true);
+                const move = function (ev) {
+                    onMove(ev);
+                    applyHsv(true);
+                };
+                const up = function () {
+                    el.removeEventListener("pointermove", move);
+                    el.removeEventListener("pointerup", up);
+                    el.removeEventListener("pointercancel", up);
+                    applyHsv(false);
+                    if (onDone) onDone();
+                };
+                el.addEventListener("pointermove", move);
+                el.addEventListener("pointerup", up);
+                el.addEventListener("pointercancel", up);
+            });
+        }
+
+        drag(sv, function (e) {
+            const r = sv.getBoundingClientRect();
+            st.hsv.s = clamp((e.clientX - r.left) / r.width, 0, 1);
+            st.hsv.v = 1 - clamp((e.clientY - r.top) / r.height, 0, 1);
+        });
+        drag(hue, function (e) {
+            const r = hue.getBoundingClientRect();
+            st.hsv.h = clamp((e.clientX - r.left) / r.width, 0, 1) * 360;
+        });
+
+        pop.addEventListener("wheel", function (e) {
+            e.stopPropagation();
+        });
+
+        swatch.addEventListener("click", function (e) {
+            e.stopPropagation();
+            const open = field.classList.contains("open");
+            closeAllColorPickers();
+            closeAllDropdowns();
+            if (open) return;
+            syncColorField(input);
+            positionColorPopover(st);
+            field.classList.add("open");
+        });
+
+        syncColorField(input);
+    }
+
+    function positionColorPopover(st) {
+        const r = st.swatch.getBoundingClientRect();
+        const pop = st.pop;
+        pop.style.left = clamp(r.left, 8, window.innerWidth - 240) + "px";
+        pop.style.top = r.bottom + 8 + "px";
+        const h = pop.offsetHeight;
+        if (r.bottom + 8 + h > window.innerHeight && r.top - 8 - h > 0) {
+            pop.style.top = r.top - 8 - h + "px";
+        }
+    }
+
+    function enhanceColorInputs() {
+        document.querySelectorAll('input[type="color"]').forEach(enhanceColorInput);
     }
 
     // ---------------------------------------------------------------------
@@ -3113,12 +3934,55 @@
         loadPresets();
         renderPresetOptions();
         bindEvents();
+        enhanceRanges();
+        enhanceNumberInputs();
+        enhanceSelects();
+        enhanceColorInputs();
+        document.addEventListener("click", function (e) {
+            const t = e.target;
+            if (!t || !t.closest) {
+                closeAllDropdowns();
+                closeAllColorPickers();
+                return;
+            }
+            if (!t.closest(".dropdown")) closeAllDropdowns();
+            if (!t.closest(".color-field")) closeAllColorPickers();
+        });
+        // Close popovers on scroll, but never when the scroll happens inside a
+        // popover itself (that would make the dropdown impossible to scroll).
+        window.addEventListener(
+            "scroll",
+            function (e) {
+                const t = e.target;
+                if (t && t.closest && (t.closest(".dropdown-menu") || t.closest(".color-popover"))) {
+                    return;
+                }
+                closeAllDropdowns();
+                closeAllColorPickers();
+            },
+            true
+        );
+        window.addEventListener("resize", function () {
+            customSelects.forEach(function (state) {
+                if (state.wrap.classList.contains("open") && state.position) state.position();
+            });
+            customColors.forEach(function (state) {
+                if (state.field.classList.contains("open")) positionColorPopover(state);
+            });
+        });
+        bgColor.value = state.background;
+        startWidth.value = DEFAULT_CANVAS.width;
+        startHeight.value = DEFAULT_CANVAS.height;
+        startBg.value = state.background;
         setActiveTool("select");
         readPaddingInputs();
         commit();
         updateHistoryButtons();
         render();
         syncUI();
+
+        // Everything stays locked until a project is started.
+        if (!state.started) setAppLocked(true);
 
         initFonts();
         if (document.fonts && document.fonts.ready) {

@@ -19,6 +19,7 @@
                 <button id="btn-open" class="btn" type="button">Open Image</button>
                 <button id="btn-replace" class="btn" type="button" disabled>Replace Image</button>
                 <button id="btn-save" class="btn btn-primary" type="button">Save Image</button>
+                <button id="btn-restart" class="btn btn-danger" type="button" title="Discard everything and start over">Restart</button>
             </div>
         </header>
 
@@ -81,7 +82,7 @@
                     </div>
                     <div class="field">
                         <label>Custom</label>
-                        <input type="color" id="bg-color" value="#ffffff" />
+                        <input type="color" id="bg-color" value="#232733" />
                     </div>
                 </section>
             </aside>
@@ -153,6 +154,10 @@
                             <option value="Zain Bold">Zain Bold</option>
                         </select>
                     </div>
+                    <p class="hint">
+                        Want your own fonts? Drop <code>.ttf</code> / <code>.otf</code> files into the
+                        <code>fonts</code> folder next to the app and restart.
+                    </p>
                     <div class="field">
                         <label>Size <span id="text-size-value">48</span></label>
                         <input type="range" id="text-size" min="8" max="400" value="48" />
@@ -256,7 +261,7 @@
                     </div>
                     <div class="field" id="shape-fill-field">
                         <label>Fill</label>
-                        <input type="color" id="shape-fill" value="#ff0000" />
+                        <input type="color" id="shape-fill" value="#232733" />
                     </div>
                     <div class="field hidden" id="shape-blur-field">
                         <label>Blur strength <span id="shape-blur-value">16</span></label>
@@ -294,6 +299,49 @@
     </div>
 
     <div id="toasts" class="toasts"></div>
+
+    <div class="start-overlay" id="start-overlay">
+        <div class="start-card">
+            <div class="start-head">
+                <span class="brand-mark">ME</span>
+                <div>
+                    <h2>Start a project</h2>
+                    <p class="muted">Open an image or begin with an empty canvas.</p>
+                </div>
+            </div>
+            <div class="start-grid">
+                <div class="start-option">
+                    <h3>Open an image</h3>
+                    <p class="muted">Edit a meme from a photo on your computer.</p>
+                    <button id="start-open" class="btn btn-primary" type="button">Open image</button>
+                </div>
+                <div class="start-option">
+                    <h3>Empty canvas</h3>
+                    <div class="pad-grid">
+                        <label>Width <input type="number" id="start-width" min="1" max="10000" step="1" value="800" /></label>
+                        <label>Height <input type="number" id="start-height" min="1" max="10000" step="1" value="600" /></label>
+                    </div>
+                    <div class="field">
+                        <label>Background</label>
+                        <input type="color" id="start-bg" value="#232733" />
+                    </div>
+                    <button id="start-empty" class="btn" type="button">Create canvas</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="confirm-overlay hidden" id="confirm-overlay">
+        <div class="confirm-card">
+            <h3 id="confirm-title">Restart project?</h3>
+            <p class="muted" id="confirm-message">All changes will be lost. This cannot be undone.</p>
+            <div class="row gap">
+                <button id="confirm-cancel" class="btn" type="button">Cancel</button>
+                <button id="confirm-yes" class="btn btn-danger" type="button">Restart</button>
+            </div>
+        </div>
+    </div>
+
     <input type="file" id="file-input" accept="image/*" hidden />
     <input type="file" id="layer-input" accept="image/*" hidden />
     <input type="file" id="replace-input" accept="image/*" hidden />

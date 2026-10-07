@@ -31,32 +31,56 @@
 
 ## Features
 
+- **Start screen** — begin with an image, or an empty canvas with a custom size and background color.
 - **Image input** — open a file, drag & drop from your OS, or paste from the clipboard.
-- **Image layers** — stack extra images (logos, stickers) on top of the base image and resize them.
+- **Image layers** — stack extra images (logos, stickers) on top of the base image, resize/rotate them, and crop them in place.
 - **Replace base image** — swap the underlying meme while keeping text, stickers and shapes in place.
-- **Text tool** — content, font, size, alignment, color, and outline. Auto-fit and max-size options.
-- **Text presets** — save, apply, rename and delete reusable text styles.
-- **Shapes** — rectangles (with corner radius) and ellipses.
-- **Brush** — freehand draw, or use cover/remove mode to paint over parts of an image with a color.
+- **Text tool** — content, font, size, alignment, color and outline, with auto-fit and max-size options.
+- **RTL / LTR direction** — right-to-left is the default writing direction (great for Farsi/Arabic with embedded English).
+- **Custom fonts** — drop your own `.ttf` / `.otf` / `.woff` / `.woff2` files into the `fonts` folder next to the app.
+- **Text presets** — save, apply, rename and delete reusable text styles, and set a default for all new text.
+- **Shapes** — rectangles (with corner radius) and ellipses that can be painted as a solid color or as a live **background blur**.
+- **Brush** — freehand draw, cover/remove, or blur the background. The pixel work runs on the Go backend.
+- **Rotate** — rotate any object with its rotate handle (hold `Shift` for 15° steps) or the rotation controls.
 - **Eyedropper** — sample any color from the canvas.
-- **Padding** — add percentage-based padding on each side, with Classic and Modern presets.
-- **Background** — white, black, or any custom color.
-- **Arrange** — bring forward / send backward, and delete selected objects.
-- **Undo / redo** — full history of your edits.
+- **Logo quick-access** — save a logo once and drop it onto the canvas with one click.
+- **Padding** — percentage-based padding per side, with Classic and Modern presets.
+- **Background** — any custom color, applied to the canvas and used as the default shape fill.
+- **Arrange** — bring forward / send backward, and delete the selected object.
+- **Undo / redo** — a full history of your edits.
+- **Themed UI** — custom dropdowns and a built-in color picker designed for the app.
 - **Export** — save the composition as a PNG via a native save dialog, remembering the last folder you used.
 
 ## Download
 
-Grab the latest prebuilt binary from the [Releases](https://github.com/TheFeij/MemeEditor/releases) page:
+Grab the latest release from the [Releases](https://github.com/TheFeij/MemeEditor/releases) page.
+Each download is a `.zip` containing the executable and an (empty) `fonts` folder:
 
-| Platform | File |
-| --- | --- |
-| Linux (amd64) | `MemeEditor-linux-amd64` |
-| Windows (amd64) | `MemeEditor-windows-amd64.exe` |
+| Platform | Archive | Contents |
+| --- | --- | --- |
+| Linux (amd64) | `MemeEditor-linux-amd64.zip` | `MemeEditor`, `fonts/` |
+| Windows (amd64) | `MemeEditor-windows-amd64.zip` | `MemeEditor.exe`, `fonts/` |
 
 On Linux you need `webkit2gtk`. The prebuilt binary is compiled with the
 `webkit2_41` tag, so install `webkit2gtk-4.1` (e.g. `libwebkit2gtk-4.1-0` on Debian/Ubuntu).
 On Windows the app uses the bundled WebView2 runtime (present by default on Windows 10/11).
+
+## Custom fonts
+
+The app bundles some fonts (Zain, Vazirmatn) and also loads any fonts found in a
+`fonts` folder placed **next to the executable**:
+
+```
+MemeEditor            # or MemeEditor.exe on Windows
+fonts/
+  MyriadArabic-Regular.otf
+  MyFont-Bold.ttf
+  ...
+```
+
+Supported formats: `.ttf`, `.otf`, `.woff`, `.woff2`. The family name is derived
+from the file name (`MyriadArabic-Regular.otf` → "MyriadArabic Regular").
+Restart the app after adding or removing fonts and they'll appear in the font list.
 
 ## Build from source
 
@@ -85,6 +109,7 @@ Output:
 
 - `build/bin/MemeEditor` — Linux executable
 - `build/bin/MemeEditor.exe` — Windows executable
+- `build/bin/fonts/` — drop-in folder for your own fonts (with a short note)
 
 ## Development
 
@@ -106,7 +131,7 @@ This runs `wails dev` for live reloading while you edit the frontend.
 | `C` | Crop |
 | `I` | Eyedropper |
 | `Delete` / `Backspace` | Delete selected object |
-| `Esc` | Cancel crop |
+| `Esc` | Cancel crop / image crop |
 | `Ctrl/Cmd + Z` | Undo |
 | `Ctrl/Cmd + Shift + Z` | Redo |
 | `Ctrl/Cmd + S` | Save image |
@@ -114,24 +139,29 @@ This runs `wails dev` for live reloading while you edit the frontend.
 ## Tech stack
 
 - **Frontend** — plain HTML, CSS and JavaScript with the HTML5 Canvas API. No framework, no bundler.
-- **Backend** — a minimal Go backend via [Wails](https://wails.io/) v2 that:
+- **Backend** — a small Go backend via [Wails](https://wails.io/) v2 that:
   - embeds and serves the frontend assets,
   - reads image files dropped onto the window,
-  - opens a native save dialog and writes the exported PNG.
+  - opens a native save dialog and writes the exported PNG,
+  - applies the pixel **blur** used by the blur paint mode (parallelized across all CPU cores),
+  - scans the drop-in `fonts` folder and hands user fonts to the frontend at runtime.
 
 ## Project structure
 
 ```
 .
 ├── main.go                 # Wails entrypoint, embeds the frontend
-├── app.go                  # Minimal Go backend: read dropped files, native save dialog
+├── app.go                  # Backend: read dropped files, native save dialog, config
+├── blur.go                 # Backend: parallel box blur for the blur paint mode
+├── fonts.go                # Backend: runtime discovery of user fonts
 ├── index.html              # App shell / UI
-├── style.css               # Styling
+├── style.css               # Styling (themed controls, dropdowns, color picker)
 ├── app.js                  # Editor logic (canvas rendering, tools, history, export)
 ├── assets/fonts/           # Bundled fonts (Zain, Vazirmatn)
-├── build/                  # Wails build assets (icons, manifests)
+├── build/                  # Wails build assets (appicon.png, windows/icon.ico)
+├── logo.svg / logo.png     # App logo and generated icon
 ├── Makefile                # Build targets
-└── .github/workflows/      # CI: build & release binaries
+└── .github/workflows/      # CI: build & release zipped binaries
 ```
 
 ## Credits
