@@ -56,6 +56,8 @@
 Grab the latest release from the [Releases](https://github.com/TheFeij/MemeEditor/releases) page.
 Each download is a `.zip` containing the executable and an (empty) `fonts` folder:
 
+- **v1.1.0** — <https://github.com/TheFeij/MemeEditor/releases/tag/v1.1.0>
+
 | Platform | Archive | Contents |
 | --- | --- | --- |
 | Linux (amd64) | `MemeEditor-linux-amd64.zip` | `MemeEditor`, `fonts/` |
