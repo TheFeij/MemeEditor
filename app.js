@@ -91,6 +91,7 @@
         currentShapeFill: DEFAULT_SHAPE_FILL,
         currentShapeMode: "fill",
         currentShapeBlur: DEFAULT_BLUR_RADIUS,
+        logoImage: null,
         textPresets: [],
         defaultPresetId: null
     };
@@ -99,6 +100,10 @@
     let historyIndex = -1;
     let interaction = null;
     let rafPending = false;
+    let pendingLogoPlace = false;
+    // Active crop of an image layer: { objectId, rect } (rect in the object's
+    // local, unrotated coordinates) or null.
+    let imageCrop = null;
 
     // Crop tool rectangle (document coordinates). View-only until applied.
     let crop = null;
@@ -156,9 +161,11 @@
     const propText = $("prop-text");
     const propImage = $("prop-image");
     const propShape = $("prop-shape");
+    const propBrush = $("prop-brush");
     const propCrop = $("prop-crop");
     const propOrder = $("prop-order");
     const propTransform = $("prop-transform");
+    const propertiesEl = $("properties");
 
     const cropApply = $("crop-apply");
     const cropCancel = $("crop-cancel");
@@ -195,6 +202,12 @@
     const imageOpacityValue = $("image-opacity-value");
     const imageWidth = $("image-width");
     const imageHeight = $("image-height");
+    const imageCropStart = $("image-crop-start");
+    const imageCropStartField = $("image-crop-start-field");
+    const imageCropControls = $("image-crop-controls");
+    const imageCropApply = $("image-crop-apply");
+    const imageCropCancel = $("image-crop-cancel");
+    const imageCropSize = $("image-crop-size");
 
     const shapeFill = $("shape-fill");
     const shapeFillField = $("shape-fill-field");
@@ -210,6 +223,10 @@
     const zoomOut = $("zoom-out");
     const zoomFit = $("zoom-fit");
     const zoomLabel = $("zoom-label");
+
+    const logoPlace = $("logo-place");
+    const logoChange = $("logo-change");
+    const logoInput = $("logo-input");
 
     const orderForward = $("order-forward");
     const orderBackward = $("order-backward");
@@ -1111,6 +1128,59 @@
         ctx.restore();
     }
 
+    // Editor-only overlay for cropping an image layer. Drawn in the object's
+    // local (unrotated) frame so it lines up with rotated images.
+    function drawImageCropOverlay(ctx) {
+        if (!imageCrop) return;
+        const target = state.objects.find((o) => o.id === imageCrop.objectId);
+        if (!target) return;
+        const b = getObjectBounds(target);
+        const u = 1 / (displayScale > 0 ? displayScale : 1);
+        ctx.save();
+        if (target.rotation) {
+            const c = getObjectCenter(target);
+            ctx.translate(c.x, c.y);
+            ctx.rotate((target.rotation * Math.PI) / 180);
+            ctx.translate(-c.x, -c.y);
+        }
+        const r = imageCrop.rect;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+        ctx.beginPath();
+        ctx.rect(b.x, b.y, b.width, b.height);
+        if (r && r.width > 0 && r.height > 0) {
+            ctx.rect(r.x, r.y, r.width, r.height);
+            ctx.fill("evenodd");
+        } else {
+            ctx.fill();
+        }
+
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+        ctx.lineWidth = 1 * u;
+        ctx.setLineDash([5 * u, 4 * u]);
+        ctx.strokeRect(b.x, b.y, b.width, b.height);
+        ctx.setLineDash([]);
+
+        if (r && r.width >= 1 && r.height >= 1) {
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+            ctx.lineWidth = 1 * u;
+            ctx.beginPath();
+            for (let i = 1; i < 3; i++) {
+                const gx = r.x + (r.width * i) / 3;
+                ctx.moveTo(gx, r.y);
+                ctx.lineTo(gx, r.y + r.height);
+                const gy = r.y + (r.height * i) / 3;
+                ctx.moveTo(r.x, gy);
+                ctx.lineTo(r.x + r.width, gy);
+            }
+            ctx.stroke();
+
+            ctx.strokeStyle = "#4f74ff";
+            ctx.lineWidth = 1.5 * u;
+            ctx.strokeRect(r.x, r.y, r.width, r.height);
+        }
+        ctx.restore();
+    }
+
     function getRenderScale(size) {
         const longSide = Math.max(size.width, size.height);
         if (longSide <= 0) return 1;
@@ -1149,7 +1219,8 @@
         updateSelectionGuides();
         drawGuides(ctx);
         drawCropOverlay(ctx);
-        drawSelection(ctx);
+        drawImageCropOverlay(ctx);
+        if (!imageCrop) drawSelection(ctx);
 
         updateEmptyState();
     }
@@ -1363,6 +1434,76 @@
     }
 
     // ---------------------------------------------------------------------
+    // Logo (quick-access image)
+    // ---------------------------------------------------------------------
+
+    function setLogoFromFile(file, placeAfter) {
+        if (!file) return;
+        if (!isImageFile(file)) {
+            toast("Unsupported file type", "error");
+            return;
+        }
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = function () {
+            URL.revokeObjectURL(url);
+            state.logoImage = img;
+            toast("Logo saved for quick access");
+            if (placeAfter) addLogoLayer();
+        };
+        img.onerror = function () {
+            URL.revokeObjectURL(url);
+            toast("Could not read logo image", "error");
+        };
+        img.src = url;
+    }
+
+    // Drop the saved logo into the canvas as a normal image layer, sized
+    // relative to the document and centered so it is easy to notice and move.
+    function addLogoLayer() {
+        const img = state.logoImage;
+        if (!img) return;
+        const size = computeDocumentSize();
+        let w = Math.round(size.width * 0.54);
+        let h = Math.max(1, Math.round(w * (img.naturalWidth ? img.naturalHeight / img.naturalWidth : 0.5)));
+        const maxW = size.width * 0.8;
+        const maxH = size.height * 0.8;
+        if (w > maxW || h > maxH) {
+            const k = Math.min(maxW / w, maxH / h);
+            w *= k;
+            h *= k;
+        }
+        const obj = {
+            id: uid(),
+            type: "image",
+            source: img,
+            x: Math.round((size.width - w) / 2),
+            y: Math.round((size.height - h) / 2),
+            width: Math.round(w),
+            height: Math.round(h),
+            opacity: 1,
+            rotation: 0
+        };
+        state.objects.push(obj);
+        state.selectedObjectId = obj.id;
+        state.activeTool = "select";
+        commit();
+        render();
+        syncUI();
+        toast("Logo added");
+    }
+
+    function placeLogo() {
+        if (!state.logoImage) {
+            // No logo saved yet: let the user pick one straight away.
+            pendingLogoPlace = true;
+            logoInput.click();
+            return;
+        }
+        addLogoLayer();
+    }
+
+    // ---------------------------------------------------------------------
     // Fonts
     // ---------------------------------------------------------------------
 
@@ -1543,8 +1684,9 @@
             toast("Open an image before cropping", "error");
             return;
         }
+        if (imageCrop) imageCrop = null;
         if (tool !== "crop") crop = null;
-        if (tool === "crop") {
+        if (tool === "crop" || tool === "brush") {
             state.selectedObjectId = null;
             guideState = null;
         }
@@ -1582,20 +1724,41 @@
         requestRender();
     }
 
+    // Keep the Arrange section prominent: for text objects it sits right below
+    // the text content field; for every other object it sits at the top of the
+    // properties panel.
+    function placeArrangeSection(type) {
+        if (type === "text") {
+            const anchor = textContent.closest(".field");
+            if (anchor && anchor.nextSibling !== propOrder) {
+                anchor.parentNode.insertBefore(propOrder, anchor.nextSibling);
+            }
+        } else if (propertiesEl.firstChild !== propOrder) {
+            propertiesEl.insertBefore(propOrder, propertiesEl.firstChild);
+        }
+    }
+
     function syncUI() {
         document.querySelectorAll(".tool").forEach((btn) => {
             btn.classList.toggle("active", btn.dataset.tool === state.activeTool);
         });
 
         const obj = getSelectedObject();
+        if (imageCrop && !state.objects.some((o) => o.id === imageCrop.objectId)) {
+            imageCrop = null;
+        }
         const cropping = state.activeTool === "crop" && !!state.baseImage.source;
-        propEmpty.classList.toggle("hidden", !!obj || cropping);
+        const showBrush = state.activeTool === "brush";
+        propEmpty.classList.toggle("hidden", !!obj || cropping || showBrush);
         propText.classList.toggle("hidden", !(obj && obj.type === "text"));
         propImage.classList.toggle("hidden", !(obj && obj.type === "image"));
         propShape.classList.toggle("hidden", !(obj && (obj.type === "rect" || obj.type === "ellipse")));
+        propBrush.classList.toggle("hidden", !showBrush);
         propCrop.classList.toggle("hidden", !cropping);
         propOrder.classList.toggle("hidden", !obj || cropping);
         propTransform.classList.toggle("hidden", !obj || cropping);
+
+        placeArrangeSection(obj ? obj.type : null);
 
         if (obj) updateRotationUI(obj);
 
@@ -1635,6 +1798,18 @@
             imageOpacityValue.textContent = pct;
             imageWidth.value = Math.round(obj.width);
             imageHeight.value = Math.round(obj.height);
+
+            const croppingImage = !!(imageCrop && imageCrop.objectId === obj.id);
+            imageCropStartField.classList.toggle("hidden", croppingImage);
+            imageCropControls.classList.toggle("hidden", !croppingImage);
+            if (croppingImage) {
+                const r = imageCrop.rect;
+                const ready = !!r && r.width >= 2 && r.height >= 2;
+                imageCropApply.disabled = !ready;
+                imageCropSize.textContent = ready
+                    ? Math.round(r.width) + " × " + Math.round(r.height) + " px"
+                    : "";
+            }
         }
 
         if (obj && (obj.type === "rect" || obj.type === "ellipse")) {
@@ -1682,6 +1857,28 @@
             canvas.setPointerCapture(event.pointerId);
         } catch (err) {
             /* pointer capture is best-effort */
+        }
+
+        // Cropping an image layer takes priority while it is active.
+        if (imageCrop) {
+            const target = state.objects.find((o) => o.id === imageCrop.objectId);
+            if (target) {
+                const local = toLocalPoint(target, p);
+                const b = getObjectBounds(target);
+                const inside =
+                    local.x >= b.x &&
+                    local.x <= b.x + b.width &&
+                    local.y >= b.y &&
+                    local.y <= b.y + b.height;
+                if (inside) {
+                    state.selectedObjectId = target.id;
+                    imageCrop.rect = { x: local.x, y: local.y, width: 0, height: 0 };
+                    interaction = { kind: "imagecrop", object: target, start: local };
+                    render();
+                    syncUI();
+                }
+            }
+            return;
         }
 
         if (tool === "crop") {
@@ -1872,6 +2069,10 @@
     }
 
     function updateHoverCursor(event) {
+        if (imageCrop) {
+            canvas.style.cursor = "crosshair";
+            return;
+        }
         if (state.activeTool !== "select") return;
         const p = getDocPoint(event);
         const selected = getSelectedObject();
@@ -1898,6 +2099,21 @@
 
         if (interaction.kind === "brush") {
             interaction.object.points.push({ x: p.x, y: p.y });
+            requestRender();
+            return;
+        }
+
+        if (interaction.kind === "imagecrop") {
+            const target = interaction.object;
+            const b = getObjectBounds(target);
+            const local = toLocalPoint(target, p);
+            const s = interaction.start;
+            const x0 = clamp(Math.min(s.x, local.x), b.x, b.x + b.width);
+            const y0 = clamp(Math.min(s.y, local.y), b.y, b.y + b.height);
+            const x1 = clamp(Math.max(s.x, local.x), b.x, b.x + b.width);
+            const y1 = clamp(Math.max(s.y, local.y), b.y, b.y + b.height);
+            imageCrop.rect = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+            syncUI();
             requestRender();
             return;
         }
@@ -1963,6 +2179,10 @@
             commit();
         } else if (kind === "crop") {
             if (!crop || crop.width < 2 || crop.height < 2) crop = null;
+        } else if (kind === "imagecrop") {
+            if (!imageCrop.rect || imageCrop.rect.width < 2 || imageCrop.rect.height < 2) {
+                imageCrop.rect = null;
+            }
         } else if (kind === "create") {
             const o = interaction.object;
             if (o.width < 2 || o.height < 2) {
@@ -2318,6 +2538,66 @@
     }
 
     // ---------------------------------------------------------------------
+    // Image layer crop
+    // ---------------------------------------------------------------------
+
+    function sourceSize(src) {
+        return {
+            width: src.naturalWidth || src.width || 0,
+            height: src.naturalHeight || src.height || 0
+        };
+    }
+
+    function startImageCrop() {
+        const obj = getSelectedObject();
+        if (!obj || obj.type !== "image") return;
+        imageCrop = { objectId: obj.id, rect: null };
+        toast("Drag over the image to choose the area to keep");
+        render();
+        syncUI();
+    }
+
+    function cancelImageCrop() {
+        imageCrop = null;
+        render();
+        syncUI();
+    }
+
+    function applyImageCrop() {
+        const target = imageCrop && state.objects.find((o) => o.id === imageCrop.objectId);
+        const r = imageCrop && imageCrop.rect;
+        if (!target || !r || r.width < 2 || r.height < 2) {
+            toast("Select a crop area first", "error");
+            return;
+        }
+        const b = getObjectBounds(target);
+        const src = sourceSize(target.source);
+        const scaleX = src.width / b.width;
+        const scaleY = src.height / b.height;
+        const sx = clamp(Math.round((r.x - b.x) * scaleX), 0, src.width - 1);
+        const sy = clamp(Math.round((r.y - b.y) * scaleY), 0, src.height - 1);
+        const sw = clamp(Math.round(r.width * scaleX), 1, src.width - sx);
+        const sh = clamp(Math.round(r.height * scaleY), 1, src.height - sy);
+
+        const off = document.createElement("canvas");
+        off.width = sw;
+        off.height = sh;
+        off.getContext("2d").drawImage(target.source, sx, sy, sw, sh, 0, 0, sw, sh);
+
+        target.source = off;
+        target.x = r.x;
+        target.y = r.y;
+        target.width = r.width;
+        target.height = r.height;
+
+        imageCrop = null;
+        commit();
+        render();
+        syncUI();
+        toast("Image cropped to " + sw + " × " + sh);
+    }
+
+    // ---------------------------------------------------------------------
     // Event wiring
     // ---------------------------------------------------------------------
 
@@ -2628,6 +2908,20 @@
         zoomFit.addEventListener("click", function () {
             setZoom(1);
         });
+
+        // Logo quick access
+        logoPlace.addEventListener("click", placeLogo);
+        logoChange.addEventListener("click", function () {
+            pendingLogoPlace = false;
+            logoInput.click();
+        });
+        logoInput.addEventListener("change", function (e) {
+            const file = e.target.files[0];
+            const place = pendingLogoPlace;
+            pendingLogoPlace = false;
+            setLogoFromFile(file, place);
+            e.target.value = "";
+        });
         stage.addEventListener(
             "wheel",
             function (e) {
@@ -2649,6 +2943,11 @@
         // Crop
         cropApply.addEventListener("click", applyCrop);
         cropCancel.addEventListener("click", cancelCrop);
+
+        // Image layer crop
+        imageCropStart.addEventListener("click", startImageCrop);
+        imageCropApply.addEventListener("click", applyImageCrop);
+        imageCropCancel.addEventListener("click", cancelImageCrop);
 
         // File inputs
         btnOpen.addEventListener("click", () => fileInput.click());
@@ -2739,7 +3038,8 @@
             if (mod) return;
 
             if (key === "escape") {
-                if (state.activeTool === "crop") cancelCrop();
+                if (imageCrop) cancelImageCrop();
+                else if (state.activeTool === "crop") cancelCrop();
                 return;
             }
 

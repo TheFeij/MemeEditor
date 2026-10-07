@@ -55,31 +55,6 @@
                 </section>
 
                 <section class="tool-section">
-                    <h3 class="section-title">Brush</h3>
-                    <div class="field">
-                        <label>Mode</label>
-                        <select id="brush-mode">
-                            <option value="draw">Draw</option>
-                            <option value="cover">Cover / Remove</option>
-                            <option value="blur">Blur background</option>
-                        </select>
-                    </div>
-                    <div class="field">
-                        <label>Color</label>
-                        <input type="color" id="brush-color" value="#000000" />
-                    </div>
-                    <div class="field">
-                        <label>Size <span id="brush-size-value">10</span></label>
-                        <input type="range" id="brush-size" min="1" max="120" value="10" />
-                    </div>
-                    <div class="field hidden" id="brush-blur-field">
-                        <label>Blur strength <span id="brush-blur-value">16</span></label>
-                        <input type="range" id="brush-blur" min="1" max="150" value="16" />
-                    </div>
-                    <button id="btn-cover-bg" class="btn btn-ghost btn-sm" type="button">Use background color</button>
-                </section>
-
-                <section class="tool-section">
                     <h3 class="section-title">Padding</h3>
                     <div class="row gap">
                         <button id="preset-classic" class="btn btn-sm" type="button">Classic</button>
@@ -123,6 +98,10 @@
                 <div class="drop-overlay" id="drop-overlay">
                     <div class="drop-inner">Drop image to add</div>
                 </div>
+                <div class="logo-controls" id="logo-controls">
+                    <button id="logo-place" class="zoom-btn logo-btn" type="button" title="Add the saved logo to the canvas">Logo</button>
+                    <button id="logo-change" class="zoom-btn logo-btn" type="button" title="Choose the logo image">Change logo</button>
+                </div>
                 <div class="zoom-controls" id="zoom-controls">
                     <button id="zoom-out" class="zoom-btn" type="button" title="Zoom out">−</button>
                     <span id="zoom-label" class="zoom-label">100%</span>
@@ -135,6 +114,31 @@
                 <section class="prop-section" id="prop-empty">
                     <h3 class="section-title">Properties</h3>
                     <p class="muted">Nothing selected.</p>
+                </section>
+
+                <section class="prop-section hidden" id="prop-brush">
+                    <h3 class="section-title">Brush</h3>
+                    <div class="field">
+                        <label>Mode</label>
+                        <select id="brush-mode">
+                            <option value="draw">Draw</option>
+                            <option value="cover">Cover / Remove</option>
+                            <option value="blur">Blur background</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label>Color</label>
+                        <input type="color" id="brush-color" value="#000000" />
+                    </div>
+                    <div class="field">
+                        <label>Size <span id="brush-size-value">10</span></label>
+                        <input type="range" id="brush-size" min="1" max="120" value="10" />
+                    </div>
+                    <div class="field hidden" id="brush-blur-field">
+                        <label>Blur strength <span id="brush-blur-value">16</span></label>
+                        <input type="range" id="brush-blur" min="1" max="150" value="16" />
+                    </div>
+                    <button id="btn-cover-bg" class="btn btn-ghost btn-sm" type="button">Use background color</button>
                 </section>
 
                 <section class="prop-section hidden" id="prop-text">
@@ -228,6 +232,17 @@
                         <label>Width <input type="number" id="image-width" min="1" /></label>
                         <label>Height <input type="number" id="image-height" min="1" /></label>
                     </div>
+                    <div class="field" id="image-crop-start-field">
+                        <button id="image-crop-start" class="btn btn-sm" type="button">Crop image</button>
+                    </div>
+                    <div class="hidden" id="image-crop-controls">
+                        <p class="hint">Drag over the image to choose the area to keep.</p>
+                        <div class="row gap">
+                            <button id="image-crop-apply" class="btn btn-sm btn-primary" type="button" disabled>Apply crop</button>
+                            <button id="image-crop-cancel" class="btn btn-sm btn-ghost" type="button">Cancel</button>
+                        </div>
+                        <p class="hint" id="image-crop-size"></p>
+                    </div>
                 </section>
 
                 <section class="prop-section hidden" id="prop-shape">
@@ -282,6 +297,7 @@
     <input type="file" id="file-input" accept="image/*" hidden />
     <input type="file" id="layer-input" accept="image/*" hidden />
     <input type="file" id="replace-input" accept="image/*" hidden />
+    <input type="file" id="logo-input" accept="image/*" hidden />
 
     <script src="app.js"></script>
 </body>
