@@ -2237,6 +2237,14 @@
             }
             const handle = hitHandle(selected, p);
             if (handle) {
+                // Resizing an auto-fit text switches it to manual sizing, so the
+                // box follows the cursor linearly instead of re-fitting to the
+                // document width and jittering around.
+                if (selected.type === "text" && selected.autoFit) {
+                    selected.fontSize = getEffectiveFontSize(selected);
+                    selected.autoFit = false;
+                    selected.scaleY = 1;
+                }
                 interaction = {
                     kind: "resize",
                     object: selected,
@@ -2388,13 +2396,13 @@
             const y1 = clamp(Math.max(s.y, local.y), b.y, b.y + b.height);
             imageCrop.rect = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
             syncUI();
-            requestRender();
+            render();
             return;
         }
 
         if (interaction.kind === "crop") {
             crop = clampCropRect(interaction.start, p);
-            requestRender();
+            render();
             return;
         }
 
@@ -2405,7 +2413,7 @@
             o.y = Math.min(s.y, p.y);
             o.width = Math.abs(p.x - s.x);
             o.height = Math.abs(p.y - s.y);
-            requestRender();
+            render();
             return;
         }
 
@@ -2416,7 +2424,7 @@
             o.y = snap.y;
             guideState = { allV: snap.allV, allH: snap.allH, v: snap.v, h: snap.h };
             interaction.moved = true;
-            requestRender();
+            render();
             return;
         }
 
@@ -2427,7 +2435,7 @@
             if (event.shiftKey) rot = Math.round(rot / 15) * 15;
             interaction.object.rotation = normalizeAngle(rot);
             updateRotationUI(interaction.object);
-            requestRender();
+            render();
             return;
         }
 
@@ -2440,7 +2448,7 @@
                 pp = rotatePoint(p, c, -rot);
             }
             applyResize(interaction, pp);
-            requestRender();
+            render();
             return;
         }
     }
