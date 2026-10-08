@@ -120,6 +120,13 @@
     let interaction = null;
     let rafPending = false;
     let pendingLogoPlace = false;
+    // Eyedropper sampling launched from a colour picker: while active the next
+    // canvas click feeds the picked colour to `eyedropperApply`.
+    let eyedropperActive = false;
+    let eyedropperApply = null;
+    // Most recently opened colour picker, so the "I" shortcut knows where to
+    // send a sampled colour.
+    let lastColorInput = null;
     // Active crop of an image layer: { objectId, rect } (rect in the object's
     // local, unrotated coordinates) or null.
     let imageCrop = null;
@@ -2152,8 +2159,13 @@
         const tool = state.activeTool;
         guideState = null;
 
-        if (tool === "eyedropper") {
-            sampleColorAt(p);
+        if (eyedropperActive) {
+            const hex = colorAt(p);
+            if (!hex) return;
+            const apply = eyedropperApply;
+            stopEyedropper();
+            if (apply) apply(hex);
+            toast("Picked " + hex);
             return;
         }
 
@@ -2381,6 +2393,10 @@
     }
 
     function updateHoverCursor(event) {
+        if (eyedropperActive) {
+            canvas.style.cursor = "crosshair";
+            return;
+        }
         if (imageCrop) {
             canvas.style.cursor = "crosshair";
             return;
@@ -2544,20 +2560,46 @@
         });
     }
 
-    function sampleColorAt(p) {
+    // Read the rendered pixel under a document-space point. Returns a #rrggbb
+    // string, or null when the point is outside the document.
+    function colorAt(p) {
         const size = computeDocumentSize();
         const x = Math.floor(p.x);
         const y = Math.floor(p.y);
-        if (x < 0 || y < 0 || x >= size.width || y >= size.height) return;
+        if (x < 0 || y < 0 || x >= size.width || y >= size.height) return null;
         const ctx = getCtx();
         const px = clamp(Math.floor(p.x * renderScale), 0, canvas.width - 1);
         const py = clamp(Math.floor(p.y * renderScale), 0, canvas.height - 1);
         const data = ctx.getImageData(px, py, 1, 1).data;
-        const hex = rgbToHex(data[0], data[1], data[2]);
-        state.currentColor = hex;
-        state.brush.color = hex;
-        brushColor.value = hex;
-        toast("Picked " + hex);
+        return rgbToHex(data[0], data[1], data[2]);
+    }
+
+    // Start sampling a colour from the canvas. `apply` receives the picked hex
+    // value once the user clicks.
+    function startEyedropper(apply) {
+        eyedropperActive = true;
+        eyedropperApply = apply;
+        canvas.style.cursor = "crosshair";
+        closeAllColorPickers();
+        closeAllDropdowns();
+        toast("Click the canvas to pick a color");
+    }
+
+    function stopEyedropper() {
+        eyedropperActive = false;
+        eyedropperApply = null;
+        canvas.style.cursor = CURSORS[state.activeTool] || "default";
+    }
+
+    function pickIntoColorInput(input, hex) {
+        const st = customColors.get(input);
+        if (st) {
+            st.applyHex(hex, false);
+            return;
+        }
+        input.value = hex;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
     // ---------------------------------------------------------------------
@@ -3571,6 +3613,10 @@
                     closeConfirm();
                     return;
                 }
+                if (eyedropperActive) {
+                    stopEyedropper();
+                    return;
+                }
                 if (imageCrop) cancelImageCrop();
                 else if (state.activeTool === "crop") cancelCrop();
                 return;
@@ -3595,9 +3641,13 @@
                 case "c":
                     setActiveTool("crop");
                     break;
-                case "i":
-                    setActiveTool("eyedropper");
+                case "i": {
+                    const target = lastColorInput || brushColor;
+                    startEyedropper(function (picked) {
+                        pickIntoColorInput(target, picked);
+                    });
                     break;
+                }
                 case "delete":
                 case "backspace":
                     e.preventDefault();
@@ -4095,6 +4145,23 @@
         hex.spellcheck = false;
         row.appendChild(hex);
 
+        const eyedrop = document.createElement("button");
+        eyedrop.type = "button";
+        eyedrop.className = "cp-eyedropper";
+        eyedrop.title = "Pick a color from the canvas";
+        eyedrop.setAttribute("aria-label", "Pick a color from the canvas");
+        eyedrop.innerHTML =
+            '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+            '<path d="m2 22 1-1h3l9-9"/><path d="M3 21v-3l9-9"/>' +
+            '<path d="m15 6 3-3a2.1 2.1 0 0 1 3 3l-3 3"/><path d="m11 10 4 4"/></svg>';
+        eyedrop.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            startEyedropper(function (picked) {
+                applyHex(picked, false);
+            });
+        });
+        row.appendChild(eyedrop);
+
         const swatches = document.createElement("div");
         swatches.className = "cp-swatches";
         ["#ffffff", "#000000", "#ff0000", "#ff8c00", "#ffd400", "#22c55e", "#0ea5e9", "#6c8cff", "#a855f7", "#ec4899"].forEach(
@@ -4227,6 +4294,7 @@
             closeAllColorPickers();
             closeAllDropdowns();
             if (open) return;
+            lastColorInput = input;
             syncColorField(input);
             positionColorPopover(st);
             field.classList.add("open");

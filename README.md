@@ -42,7 +42,7 @@
 - **Shapes** — rectangles (with corner radius) and ellipses that can be painted as a solid color or as a live **background blur**.
 - **Brush** — freehand draw, cover/remove, or blur the background. The pixel work runs on the Go backend.
 - **Rotate** — rotate any object with its rotate handle (hold `Shift` for 15° steps) or the rotation controls.
-- **Eyedropper** — sample any color from the canvas.
+- **Eyedropper** — every color picker has an eyedropper button to sample a color straight from the canvas.
 - **Logo quick-access** — save a logo once and drop it onto the canvas with one click.
 - **Padding** — percentage-based padding per side, with Classic and Modern presets.
 - **Background** — any custom color, applied to the canvas and used as the default shape fill.
@@ -131,9 +131,9 @@ This runs `wails dev` for live reloading while you edit the frontend.
 | `R` | Rectangle |
 | `E` | Ellipse |
 | `C` | Crop |
-| `I` | Eyedropper |
+| `I` | Eyedropper into the last color picker you opened |
 | `Delete` / `Backspace` | Delete selected object |
-| `Esc` | Cancel crop / image crop |
+| `Esc` | Cancel eyedropper / crop / image crop |
 | `Ctrl/Cmd + Z` | Undo |
 | `Ctrl/Cmd + Shift + Z` | Redo |
 | `Ctrl/Cmd + S` | Save image |
