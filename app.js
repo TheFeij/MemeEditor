@@ -40,8 +40,13 @@
     // Neutral slate that suits the dark UI (was pure white).
     const DEFAULT_BACKGROUND = "#232733";
     const MAX_HISTORY = 120;
+    // Legacy keys, kept so existing browser-only users keep their presets.
     const PRESET_STORAGE_KEY = "memeEditor.textPresets";
     const DEFAULT_PRESET_STORAGE_KEY = "memeEditor.defaultTextPreset";
+    // Single preferences blob used when no native backend is available
+    // (e.g. opening the page in a regular browser).
+    const PREF_STORAGE_KEY = "memeEditor.preferences";
+    const PREFERENCES_VERSION = 1;
     // Default writing direction for new text. The main use case is Farsi with
     // embedded English words, so RTL (which still renders Latin runs correctly)
     // is the default until the user changes it.
@@ -93,10 +98,22 @@
         currentShapeMode: "fill",
         currentShapeBlur: DEFAULT_BLUR_RADIUS,
         logoImage: null,
+        logoDataURL: null,
         textPresets: [],
         defaultPresetId: null,
+        startCanvas: {
+            width: DEFAULT_CANVAS.width,
+            height: DEFAULT_CANVAS.height,
+            background: DEFAULT_BACKGROUND
+        },
         started: false
     };
+
+    // Preferences are restored asynchronously from the config file. Until that
+    // completes we must not write anything back, otherwise defaults would
+    // overwrite the user's saved settings.
+    let preferencesLoaded = false;
+    let persistTimer = null;
 
     let history = [];
     let historyIndex = -1;
@@ -1579,9 +1596,11 @@
         const h = clamp(parseInt(startHeight.value, 10) || DEFAULT_CANVAS.height, 1, 10000);
         state.baseImage = { source: null, width: w, height: h };
         state.background = hexToRgb(startBg.value) ? startBg.value : DEFAULT_BACKGROUND;
+        state.startCanvas = { width: w, height: h, background: state.background };
         state.currentShapeFill = state.background;
         bgColor.value = state.background;
         state.selectedObjectId = null;
+        schedulePersistPreferences();
         markStarted();
         commit();
         render();
@@ -1644,9 +1663,11 @@
         brushBlurField.classList.add("hidden");
         bgColor.value = DEFAULT_BACKGROUND;
         shapeFill.value = DEFAULT_BACKGROUND;
-        startWidth.value = DEFAULT_CANVAS.width;
-        startHeight.value = DEFAULT_CANVAS.height;
-        startBg.value = DEFAULT_BACKGROUND;
+        // The start-canvas size/background are saved preferences, so leave them
+        // as the user set them instead of resetting to defaults.
+        startWidth.value = state.startCanvas.width;
+        startHeight.value = state.startCanvas.height;
+        startBg.value = state.startCanvas.background;
 
         setActiveTool("select");
         commit();
@@ -1696,19 +1717,28 @@
             toast("Unsupported file type", "error");
             return;
         }
-        const url = URL.createObjectURL(file);
-        const img = new Image();
-        img.onload = function () {
-            URL.revokeObjectURL(url);
-            state.logoImage = img;
-            toast("Logo saved for quick access");
-            if (placeAfter) addLogoLayer();
+        // Read as a data URL (rather than an object URL) so the logo can be
+        // written to the preferences file and restored on the next launch.
+        const reader = new FileReader();
+        reader.onload = function () {
+            const dataURL = reader.result;
+            const img = new Image();
+            img.onload = function () {
+                state.logoImage = img;
+                state.logoDataURL = dataURL;
+                schedulePersistPreferences();
+                toast("Logo saved for quick access");
+                if (placeAfter) addLogoLayer();
+            };
+            img.onerror = function () {
+                toast("Could not read logo image", "error");
+            };
+            img.src = dataURL;
         };
-        img.onerror = function () {
-            URL.revokeObjectURL(url);
+        reader.onerror = function () {
             toast("Could not read logo image", "error");
         };
-        img.src = url;
+        reader.readAsDataURL(file);
     }
 
     // Drop the saved logo into the canvas as a normal image layer, sized
@@ -2054,6 +2084,8 @@
                 b.classList.toggle("active", b.dataset.align === obj.align);
             });
             const dir = obj.direction || DEFAULT_TEXT_DIRECTION;
+            textContent.setAttribute("dir", dir === "ltr" ? "ltr" : "rtl");
+            textContent.style.textAlign = obj.align;
             textDirectionEl.querySelectorAll("button").forEach((b) => {
                 b.classList.toggle("active", (b.dataset.dir || DEFAULT_TEXT_DIRECTION) === dir);
             });
@@ -2532,42 +2564,205 @@
     // Text presets
     // ---------------------------------------------------------------------
 
-    function loadPresets() {
-        try {
-            const raw = localStorage.getItem(PRESET_STORAGE_KEY);
-            state.textPresets = raw ? JSON.parse(raw) : [];
-            if (!Array.isArray(state.textPresets)) state.textPresets = [];
-        } catch (err) {
-            state.textPresets = [];
+    // ---------------------------------------------------------------------
+    // Preferences
+    // ---------------------------------------------------------------------
+    //
+    // User choices are persisted to a JSON config file next to the app (via the
+    // Go backend) so they survive relaunches. When the page runs in a plain
+    // browser the same blob is kept in localStorage instead.
+
+    function defaultPreferences() {
+        return {
+            version: PREFERENCES_VERSION,
+            textPresets: [],
+            defaultPresetId: null,
+            padding: { top: 0, right: 0, bottom: 0, left: 0 },
+            background: DEFAULT_BACKGROUND,
+            brush: { mode: "draw", color: "#000000", size: 10, blurRadius: DEFAULT_BLUR_RADIUS },
+            currentColor: "#000000",
+            currentShapeFill: DEFAULT_BACKGROUND,
+            currentShapeMode: "fill",
+            currentShapeBlur: DEFAULT_BLUR_RADIUS,
+            logo: null,
+            startCanvas: { width: DEFAULT_CANVAS.width, height: DEFAULT_CANVAS.height, background: DEFAULT_BACKGROUND }
+        };
+    }
+
+    function collectPreferences() {
+        return {
+            version: PREFERENCES_VERSION,
+            textPresets: state.textPresets,
+            defaultPresetId: state.defaultPresetId,
+            padding: { top: state.padding.top, right: state.padding.right, bottom: state.padding.bottom, left: state.padding.left },
+            background: state.background,
+            brush: { mode: state.brush.mode, color: state.brush.color, size: state.brush.size, blurRadius: state.brush.blurRadius },
+            currentColor: state.currentColor,
+            currentShapeFill: state.currentShapeFill,
+            currentShapeMode: state.currentShapeMode,
+            currentShapeBlur: state.currentShapeBlur,
+            logo: state.logoDataURL || null,
+            startCanvas: {
+                width: clamp(parseInt(startWidth.value, 10) || state.startCanvas.width, 1, 10000),
+                height: clamp(parseInt(startHeight.value, 10) || state.startCanvas.height, 1, 10000),
+                background: startBg.value || state.startCanvas.background
+            }
+        };
+    }
+
+    function loadPreferences() {
+        const local = loadLocalPreferences();
+        const mergeLocal = function (remote) {
+            if (!remote || typeof remote !== "object") remote = {};
+            const remotePresets = Array.isArray(remote.textPresets) ? remote.textPresets : [];
+            // Bring over presets saved by an older localStorage-only release.
+            if (!remotePresets.length && Array.isArray(local.textPresets) && local.textPresets.length) {
+                remote.textPresets = local.textPresets;
+                if (!remote.defaultPresetId) remote.defaultPresetId = local.defaultPresetId || null;
+            }
+            return remote;
+        };
+        if (hasBackend()) {
+            return window.go.main.App.LoadPreferences()
+                .then(function (raw) {
+                    return mergeLocal(raw ? JSON.parse(raw) : {});
+                })
+                .catch(function () {
+                    return local;
+                });
         }
+        return Promise.resolve(local);
+    }
+
+    function loadLocalPreferences() {
         try {
-            const def = localStorage.getItem(DEFAULT_PRESET_STORAGE_KEY);
-            state.defaultPresetId = def || null;
-        } catch (err) {
-            state.defaultPresetId = null;
-        }
+            const raw = localStorage.getItem(PREF_STORAGE_KEY);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed === "object") return parsed;
+            }
+        } catch (err) {}
+        // Migrate presets saved by older versions that only used localStorage.
+        try {
+            const presets = JSON.parse(localStorage.getItem(PRESET_STORAGE_KEY) || "[]");
+            if (Array.isArray(presets) && presets.length) {
+                return {
+                    textPresets: presets,
+                    defaultPresetId: localStorage.getItem(DEFAULT_PRESET_STORAGE_KEY) || null
+                };
+            }
+        } catch (err) {}
+        return {};
+    }
+
+    function applyPreferences(prefs) {
+        const d = defaultPreferences();
+        if (!prefs || typeof prefs !== "object") prefs = {};
+
+        state.textPresets = Array.isArray(prefs.textPresets) ? prefs.textPresets.filter((p) => p && p.id) : [];
+        state.defaultPresetId = prefs.defaultPresetId || null;
         if (state.defaultPresetId && !state.textPresets.some((p) => p.id === state.defaultPresetId)) {
             state.defaultPresetId = null;
         }
-    }
 
-    function persistPresets() {
-        try {
-            localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(state.textPresets));
-        } catch (err) {
-            toast("Could not save presets", "error");
+        if (prefs.padding && typeof prefs.padding === "object") {
+            state.padding = {
+                top: clamp(parseFloat(prefs.padding.top) || 0, 0, 200),
+                right: clamp(parseFloat(prefs.padding.right) || 0, 0, 200),
+                bottom: clamp(parseFloat(prefs.padding.bottom) || 0, 0, 200),
+                left: clamp(parseFloat(prefs.padding.left) || 0, 0, 200)
+            };
+        }
+
+        if (hexToRgb(prefs.background)) state.background = prefs.background;
+
+        if (prefs.brush && typeof prefs.brush === "object") {
+            state.brush = {
+                mode: prefs.brush.mode || d.brush.mode,
+                color: hexToRgb(prefs.brush.color) ? prefs.brush.color : d.brush.color,
+                size: clamp(parseInt(prefs.brush.size, 10) || d.brush.size, 1, 120),
+                blurRadius: clamp(parseInt(prefs.brush.blurRadius, 10) || d.brush.blurRadius, 1, 150)
+            };
+        }
+
+        if (hexToRgb(prefs.currentColor)) state.currentColor = prefs.currentColor;
+        if (hexToRgb(prefs.currentShapeFill)) state.currentShapeFill = prefs.currentShapeFill;
+        if (prefs.currentShapeMode === "blur" || prefs.currentShapeMode === "fill") {
+            state.currentShapeMode = prefs.currentShapeMode;
+        }
+        if (prefs.currentShapeBlur) {
+            state.currentShapeBlur = clamp(parseInt(prefs.currentShapeBlur, 10) || d.currentShapeBlur, 1, 150);
+        }
+
+        if (typeof prefs.logo === "string" && prefs.logo.indexOf("data:image/") === 0) {
+            state.logoDataURL = prefs.logo;
+        }
+
+        if (prefs.startCanvas && typeof prefs.startCanvas === "object") {
+            state.startCanvas = {
+                width: clamp(parseInt(prefs.startCanvas.width, 10) || d.startCanvas.width, 1, 10000),
+                height: clamp(parseInt(prefs.startCanvas.height, 10) || d.startCanvas.height, 1, 10000),
+                background: hexToRgb(prefs.startCanvas.background) ? prefs.startCanvas.background : d.startCanvas.background
+            };
         }
     }
 
-    function persistDefaultPreset() {
-        try {
-            if (state.defaultPresetId) {
-                localStorage.setItem(DEFAULT_PRESET_STORAGE_KEY, state.defaultPresetId);
-            } else {
-                localStorage.removeItem(DEFAULT_PRESET_STORAGE_KEY);
-            }
-        } catch (err) {
-            toast("Could not save default preset", "error");
+    // Push the restored preferences into the UI controls.
+    function applyPreferenceUI() {
+        padTop.value = state.padding.top;
+        padRight.value = state.padding.right;
+        padBottom.value = state.padding.bottom;
+        padLeft.value = state.padding.left;
+
+        bgColor.value = state.background;
+
+        brushMode.value = state.brush.mode;
+        brushColor.value = state.brush.color;
+        brushSize.value = state.brush.size;
+        brushSizeValue.textContent = state.brush.size;
+        brushBlur.value = state.brush.blurRadius;
+        brushBlurValue.textContent = state.brush.blurRadius;
+        brushBlurField.classList.toggle("hidden", state.brush.mode !== "blur");
+
+        shapeFill.value = state.currentShapeFill;
+        shapeBlur.value = state.currentShapeBlur;
+        shapeBlurValue.textContent = Math.round(state.currentShapeBlur);
+
+        startWidth.value = state.startCanvas.width;
+        startHeight.value = state.startCanvas.height;
+        startBg.value = state.startCanvas.background;
+
+        syncCustomColors();
+        syncCustomSelects();
+        refreshRangeFills();
+    }
+
+    function restoreLogo() {
+        if (!state.logoDataURL) return;
+        const img = new Image();
+        img.onload = function () {
+            state.logoImage = img;
+        };
+        img.src = state.logoDataURL;
+    }
+
+    // Debounced write so dragging a slider doesn't hammer the disk.
+    function schedulePersistPreferences() {
+        if (!preferencesLoaded) return;
+        if (persistTimer) clearTimeout(persistTimer);
+        persistTimer = setTimeout(persistPreferencesNow, 350);
+    }
+
+    function persistPreferencesNow() {
+        persistTimer = null;
+        if (!preferencesLoaded) return;
+        const json = JSON.stringify(collectPreferences());
+        if (hasBackend()) {
+            window.go.main.App.SavePreferences(json).catch(function () {});
+        } else {
+            try {
+                localStorage.setItem(PREF_STORAGE_KEY, json);
+            } catch (err) {}
         }
     }
 
@@ -2610,9 +2805,8 @@
         state.textPresets.push(preset);
         if (!state.defaultPresetId) {
             state.defaultPresetId = preset.id;
-            persistDefaultPreset();
         }
-        persistPresets();
+        schedulePersistPreferences();
         renderPresetOptions();
         presetSelect.value = preset.id;
         presetNameInput.value = "";
@@ -2644,7 +2838,7 @@
             return;
         }
         state.defaultPresetId = preset.id;
-        persistDefaultPreset();
+        schedulePersistPreferences();
         renderPresetOptions();
         presetSelect.value = preset.id;
         toast('"' + preset.name + '" is now the default for new text');
@@ -2662,7 +2856,7 @@
             return;
         }
         preset.name = name;
-        persistPresets();
+        schedulePersistPreferences();
         renderPresetOptions();
         presetSelect.value = preset.id;
         presetNameInput.value = "";
@@ -2678,9 +2872,8 @@
         state.textPresets = state.textPresets.filter((p) => p !== preset);
         if (state.defaultPresetId === preset.id) {
             state.defaultPresetId = null;
-            persistDefaultPreset();
         }
-        persistPresets();
+        schedulePersistPreferences();
         renderPresetOptions();
         toast("Preset deleted");
     }
@@ -2914,23 +3107,28 @@
         brushMode.addEventListener("change", function () {
             state.brush.mode = brushMode.value;
             brushBlurField.classList.toggle("hidden", state.brush.mode !== "blur");
+            schedulePersistPreferences();
         });
         brushColor.addEventListener("input", function () {
             state.brush.color = brushColor.value;
             state.currentColor = brushColor.value;
+            schedulePersistPreferences();
         });
         brushSize.addEventListener("input", function () {
             state.brush.size = parseInt(brushSize.value, 10) || 1;
             brushSizeValue.textContent = state.brush.size;
+            schedulePersistPreferences();
         });
         brushBlur.addEventListener("input", function () {
             state.brush.blurRadius = parseInt(brushBlur.value, 10) || DEFAULT_BLUR_RADIUS;
             brushBlurValue.textContent = state.brush.blurRadius;
+            schedulePersistPreferences();
         });
         btnCoverBg.addEventListener("click", function () {
             state.brush.color = state.background;
             state.currentColor = state.background;
             brushColor.value = state.background;
+            schedulePersistPreferences();
             toast("Brush color set to background");
         });
 
@@ -2952,6 +3150,7 @@
                 readPaddingInputs();
                 commit();
                 render();
+                schedulePersistPreferences();
             });
         });
 
@@ -2978,6 +3177,7 @@
             }
             commit();
             render();
+            schedulePersistPreferences();
         });
 
         // Text properties
@@ -3152,6 +3352,7 @@
             obj.fill = shapeFill.value;
             state.currentShapeFill = shapeFill.value;
             requestRender();
+            schedulePersistPreferences();
         });
         shapeFill.addEventListener("change", function () {
             const obj = getSelectedObject();
@@ -3173,6 +3374,7 @@
             if (!btn) return;
             const mode = btn.dataset.mode || "fill";
             state.currentShapeMode = mode;
+            schedulePersistPreferences();
             const obj = getSelectedObject();
             if (obj && (obj.type === "rect" || obj.type === "ellipse")) {
                 obj.mode = mode;
@@ -3185,6 +3387,7 @@
             const radius = parseInt(shapeBlur.value, 10) || DEFAULT_BLUR_RADIUS;
             state.currentShapeBlur = radius;
             shapeBlurValue.textContent = radius;
+            schedulePersistPreferences();
             const obj = getSelectedObject();
             if (obj && (obj.type === "rect" || obj.type === "ellipse")) {
                 obj.blurRadius = radius;
@@ -3258,6 +3461,10 @@
         // Start screen
         startOpen.addEventListener("click", () => fileInput.click());
         startEmpty.addEventListener("click", startEmptyCanvas);
+        [startWidth, startHeight].forEach(function (input) {
+            input.addEventListener("change", schedulePersistPreferences);
+        });
+        startBg.addEventListener("change", schedulePersistPreferences);
 
         // Restart + confirmation dialog
         btnRestart.addEventListener("click", function () {
@@ -3415,6 +3622,7 @@
         padLeft.value = values.left;
         commit();
         render();
+        schedulePersistPreferences();
     }
 
     function readPaddingInputs() {
@@ -3511,6 +3719,114 @@
                 stepBy(1);
             });
         });
+    }
+
+    // ---------------------------------------------------------------------
+    // Custom text input (contenteditable)
+    // ---------------------------------------------------------------------
+    //
+    // A native <textarea> lays mixed Farsi/English text out with the document
+    // base direction, so what you see while typing does not match the canvas.
+    // This editable field keeps plain text only (no rich markup), follows the
+    // selected object's writing direction, and exposes a textarea-like API
+    // (value / focus / select) so the rest of the code can treat it the same.
+
+    function createRichTextInput(el) {
+        if (!el || el.dataset.richText) return;
+        el.dataset.richText = "1";
+        el.setAttribute("contenteditable", "true");
+        if (!el.hasAttribute("dir")) el.setAttribute("dir", DEFAULT_TEXT_DIRECTION);
+
+        let changedSinceFocus = false;
+
+        const updateEmpty = function () {
+            el.classList.toggle("is-empty", el.textContent.length === 0);
+        };
+
+        // Insert plain text at the caret, keeping newlines as "\n" characters
+        // (rendered thanks to `white-space: pre-wrap`) instead of <br>/<div>.
+        // We do this by hand rather than with execCommand so the DOM stays a
+        // single run of text nodes, which makes the value getter reliable.
+        const insertPlainText = function (text) {
+            if (!text) return;
+            const selection = window.getSelection();
+            let range;
+            if (selection && selection.rangeCount && el.contains(selection.anchorNode)) {
+                range = selection.getRangeAt(0);
+            } else {
+                range = document.createRange();
+                range.selectNodeContents(el);
+                range.collapse(false);
+            }
+            range.deleteContents();
+            const node = document.createTextNode(text);
+            range.insertNode(node);
+            range.setStart(node, text.length);
+            range.collapse(true);
+            if (selection) {
+                selection.removeAllRanges();
+                selection.addRange(range);
+            }
+            changedSinceFocus = true;
+            updateEmpty();
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+        };
+
+        Object.defineProperty(el, "value", {
+            configurable: true,
+            get: function () {
+                return el.textContent.replace(/\r\n?/g, "\n");
+            },
+            set: function (v) {
+                const next = v == null ? "" : String(v);
+                // Guard against clobbering the caret while the user types.
+                if (el.textContent === next) {
+                    updateEmpty();
+                    return;
+                }
+                el.textContent = next;
+                updateEmpty();
+            }
+        });
+
+        // Textarea parity: select() exists on <input>/<textarea> but not on a
+        // contenteditable element.
+        el.select = function () {
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+        };
+
+        el.addEventListener("input", function () {
+            changedSinceFocus = true;
+            updateEmpty();
+        });
+
+        el.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                insertPlainText("\n");
+            }
+        });
+
+        // Paste is always plain text so pasted styling can never leak in.
+        el.addEventListener("paste", function (e) {
+            e.preventDefault();
+            const data = e.clipboardData || window.clipboardData;
+            insertPlainText(data ? data.getData("text") : "");
+        });
+
+        el.addEventListener("blur", function () {
+            updateEmpty();
+            if (changedSinceFocus) {
+                changedSinceFocus = false;
+                el.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+        });
+
+        updateEmpty();
     }
 
     // ---------------------------------------------------------------------
@@ -3938,14 +4254,21 @@
     // Boot
     // ---------------------------------------------------------------------
 
+    function bootUI() {
+        readPaddingInputs();
+        commit();
+        updateHistoryButtons();
+        render();
+        syncUI();
+    }
+
     function init() {
-        loadPresets();
-        renderPresetOptions();
         bindEvents();
         enhanceRanges();
         enhanceNumberInputs();
         enhanceSelects();
         enhanceColorInputs();
+        createRichTextInput(textContent);
         document.addEventListener("click", function (e) {
             const t = e.target;
             if (!t || !t.closest) {
@@ -3978,26 +4301,43 @@
                 if (state.field.classList.contains("open")) positionColorPopover(state);
             });
         });
-        bgColor.value = state.background;
-        startWidth.value = DEFAULT_CANVAS.width;
-        startHeight.value = DEFAULT_CANVAS.height;
-        startBg.value = state.background;
+        // Flush any pending preference write when the window is closing.
+        window.addEventListener("beforeunload", function () {
+            if (persistTimer) {
+                clearTimeout(persistTimer);
+                persistTimer = null;
+            }
+            if (preferencesLoaded) persistPreferencesNow();
+        });
         setActiveTool("select");
-        readPaddingInputs();
-        commit();
-        updateHistoryButtons();
-        render();
-        syncUI();
 
-        // Everything stays locked until a project is started.
-        if (!state.started) setAppLocked(true);
-
-        initFonts();
-        if (document.fonts && document.fonts.ready) {
-            document.fonts.ready.then(function () {
-                render();
+        // Restore saved preferences before drawing anything, so the first
+        // frame already reflects the user's previous choices.
+        loadPreferences()
+            .then(function (prefs) {
+                applyPreferences(prefs);
+                renderPresetOptions();
+                applyPreferenceUI();
+                restoreLogo();
+                preferencesLoaded = true;
+                bootUI();
+                // Make sure the config file exists from the first launch.
+                persistPreferencesNow();
+            })
+            .catch(function () {
+                preferencesLoaded = true;
+                bootUI();
+            })
+            .then(function () {
+                // Everything stays locked until a project is started.
+                if (!state.started) setAppLocked(true);
+                initFonts();
+                if (document.fonts && document.fonts.ready) {
+                    document.fonts.ready.then(function () {
+                        render();
+                    });
+                }
             });
-        }
     }
 
     if (document.readyState === "loading") {

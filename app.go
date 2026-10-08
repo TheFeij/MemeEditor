@@ -10,12 +10,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 type App struct {
 	ctx context.Context
+	mu  sync.Mutex
 }
 
 func NewApp() *App {
@@ -79,45 +81,146 @@ func (a *App) SaveImage(dataURL string) (string, error) {
 	return path, nil
 }
 
+// ---------------------------------------------------------------------
+// Configuration file
+// ---------------------------------------------------------------------
+//
+// Preferences are stored in a small JSON file next to the application
+// executable so user choices (text presets, colours, brush settings, logo and
+// so on) survive across launches. The file lives beside the binary rather than
+// in a per-OS config directory because the app is meant to be portable: copy
+// the folder and keep your settings. When that location is not writable (for
+// example a read-only install or a macOS bundle) we fall back to the working
+// directory and finally to the per-user config directory.
+
+const configFileName = "MemeEditor.config.json"
+
 type appConfig struct {
-	LastSaveDir string `json:"lastSaveDir"`
+	LastSaveDir string          `json:"lastSaveDir,omitempty"`
+	Preferences json.RawMessage `json:"preferences,omitempty"`
 }
 
-func configFile() string {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return ""
+func configCandidates() []string {
+	var out []string
+	if exe, err := os.Executable(); err == nil {
+		out = append(out, filepath.Join(filepath.Dir(exe), configFileName))
 	}
-	return filepath.Join(dir, "MemeEditor", "config.json")
+	if cwd, err := os.Getwd(); err == nil {
+		out = append(out, filepath.Join(cwd, configFileName))
+	}
+	if dir, err := os.UserConfigDir(); err == nil {
+		out = append(out, filepath.Join(dir, "MemeEditor", "config.json"))
+	}
+	return out
 }
 
-func (a *App) lastSaveDir() string {
+func dirWritable(dir string) bool {
+	f, err := os.CreateTemp(dir, ".memeeditor-write-test-*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return true
+}
+
+// configPathOverride forces a specific config location (used by tests).
+var configPathOverride string
+
+// configFile returns the first candidate location that can be created and
+// written to, or an empty string when none is available.
+func configFile() string {
+	if configPathOverride != "" {
+		return configPathOverride
+	}
+	for _, path := range configCandidates() {
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			continue
+		}
+		if dirWritable(dir) {
+			return path
+		}
+	}
+	return ""
+}
+
+// ConfigPath exposes the resolved configuration file location to the
+// frontend (useful for diagnostics / showing the user where settings live).
+func (a *App) ConfigPath() string {
+	return configFile()
+}
+
+func (a *App) readConfigLocked() appConfig {
 	path := configFile()
 	if path == "" {
-		return ""
+		return appConfig{}
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return appConfig{}
 	}
 	var cfg appConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return ""
+		return appConfig{}
 	}
-	return cfg.LastSaveDir
+	return cfg
+}
+
+func (a *App) writeConfigLocked(cfg appConfig) error {
+	path := configFile()
+	if path == "" {
+		return errors.New("no writable config location")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// LoadPreferences returns the stored preferences object as raw JSON.
+func (a *App) LoadPreferences() (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cfg := a.readConfigLocked()
+	if len(cfg.Preferences) == 0 {
+		return "{}", nil
+	}
+	return string(cfg.Preferences), nil
+}
+
+// SavePreferences replaces the stored preferences object with the supplied
+// JSON, preserving other fields (such as the last save directory).
+func (a *App) SavePreferences(preferences string) error {
+	if !json.Valid([]byte(preferences)) {
+		return errors.New("invalid preferences JSON")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cfg := a.readConfigLocked()
+	cfg.Preferences = json.RawMessage(preferences)
+	return a.writeConfigLocked(cfg)
+}
+
+func (a *App) lastSaveDir() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.readConfigLocked().LastSaveDir
 }
 
 func (a *App) rememberSaveDir(dir string) {
-	path := configFile()
-	if path == "" {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return
-	}
-	data, err := json.MarshalIndent(appConfig{LastSaveDir: dir}, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(path, data, 0o644)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cfg := a.readConfigLocked()
+	cfg.LastSaveDir = dir
+	_ = a.writeConfigLocked(cfg)
 }

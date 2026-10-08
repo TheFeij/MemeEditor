@@ -4,5 +4,8 @@ build/bin/
 # Wails generated JS bindings
 frontend/wailsjs/
 
+# Runtime preferences file (created next to the app)
+MemeEditor.config.json
+
 # OS / editor junk
 .DS_Store
