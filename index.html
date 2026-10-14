@@ -17,6 +17,7 @@
                 <button id="btn-undo" class="btn btn-icon" type="button" title="Undo (Ctrl+Z)" disabled>↶</button>
                 <button id="btn-redo" class="btn btn-icon" type="button" title="Redo (Ctrl+Shift+Z)" disabled>↷</button>
                 <button id="btn-open" class="btn" type="button">Open Image</button>
+                <button id="btn-open-video" class="btn" type="button">Open Video</button>
                 <button id="btn-replace" class="btn" type="button" disabled>Replace Image</button>
                 <button id="btn-save" class="btn btn-primary" type="button">Save Image</button>
                 <button id="btn-restart" class="btn btn-danger" type="button" title="Discard everything and start over">Restart</button>
@@ -89,12 +90,12 @@
                 <div class="empty-state" id="empty-state">
                     <div class="empty-inner">
                         <div class="empty-icon">🖼️</div>
-                        <h2>Drop an image here</h2>
+                        <h2>Drop an image or video here</h2>
                         <p>or paste from clipboard, or <button id="empty-open" class="link-btn" type="button">open a file</button>.</p>
                     </div>
                 </div>
                 <div class="drop-overlay" id="drop-overlay">
-                    <div class="drop-inner">Drop image to add</div>
+                    <div class="drop-inner">Drop image or video to add</div>
                 </div>
                 <div class="logo-controls" id="logo-controls">
                     <button id="logo-place" class="zoom-btn logo-btn" type="button" title="Add the saved logo to the canvas">Logo</button>
@@ -105,6 +106,14 @@
                     <span id="zoom-label" class="zoom-label">100%</span>
                     <button id="zoom-in" class="zoom-btn" type="button" title="Zoom in">+</button>
                     <button id="zoom-fit" class="zoom-btn zoom-fit" type="button" title="Fit to screen">Fit</button>
+                </div>
+                <div class="export-progress hidden" id="export-progress">
+                    <div class="export-progress-inner">
+                        <div class="export-progress-label" id="export-progress-label">Exporting video…</div>
+                        <div class="export-progress-track">
+                            <div class="export-progress-fill" id="export-progress-fill"></div>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -303,7 +312,46 @@
                         <button id="rotation-reset" class="btn btn-sm btn-ghost" type="button">Reset</button>
                     </div>
                 </section>
+
+                <section class="prop-section hidden" id="prop-time">
+                    <h3 class="section-title">Timing</h3>
+                    <p class="hint">When this object shows during the video.</p>
+                    <div class="pad-grid">
+                        <label>Start (s) <input type="number" id="time-start" min="0" step="0.1" value="0" /></label>
+                        <label>End (s) <input type="number" id="time-end" min="0" step="0.1" value="0" /></label>
+                    </div>
+                    <div class="row gap">
+                        <button id="time-start-here" class="btn btn-sm" type="button">Start at playhead</button>
+                        <button id="time-end-here" class="btn btn-sm" type="button">End at playhead</button>
+                    </div>
+                    <div class="row gap">
+                        <button id="time-whole" class="btn btn-sm btn-ghost" type="button">Whole clip</button>
+                    </div>
+                </section>
             </aside>
+
+            <section class="timeline hidden" id="timeline">
+                <div class="timeline-head">
+                    <button id="tl-play" class="tl-btn" type="button" title="Play / pause (Space)">▶</button>
+                    <span id="tl-current" class="tl-time">0:00</span>
+                    <span class="tl-time">/</span>
+                    <span id="tl-duration" class="tl-time">0:00</span>
+                    <button id="tl-mute" class="tl-btn" type="button" title="Mute / unmute">🔊</button>
+                    <label class="tl-check" title="Show objects that are not active at the playhead">
+                        <input type="checkbox" id="tl-showhidden" checked /> Show all
+                    </label>
+                    <span class="tl-hint">Drag bars to retime · drag edges to trim · click the ruler to scrub</span>
+                </div>
+                <div class="tl-body" id="tl-body">
+                    <div class="tl-scroll" id="tl-scroll">
+                        <div class="tl-ruler" id="tl-ruler"></div>
+                        <div class="tl-lanes" id="tl-lanes"></div>
+                    </div>
+                    <div class="tl-playhead" id="tl-playhead">
+                        <div class="tl-playhead-handle"></div>
+                    </div>
+                </div>
+            </section>
         </main>
     </div>
 
@@ -315,7 +363,7 @@
                 <span class="brand-mark">ME</span>
                 <div>
                     <h2>Start a project</h2>
-                    <p class="muted">Open an image or begin with an empty canvas.</p>
+                    <p class="muted">Open an image or video, or begin with an empty canvas.</p>
                 </div>
             </div>
             <div class="start-grid">
@@ -323,6 +371,11 @@
                     <h3>Open an image</h3>
                     <p class="muted">Edit a meme from a photo on your computer.</p>
                     <button id="start-open" class="btn btn-primary" type="button">Open image</button>
+                </div>
+                <div class="start-option">
+                    <h3>Open a video</h3>
+                    <p class="muted">Make a video meme with timed text, shapes and stickers.</p>
+                    <button id="start-open-video" class="btn" type="button">Open video</button>
                 </div>
                 <div class="start-option">
                     <h3>Empty canvas</h3>
@@ -352,8 +405,9 @@
     </div>
 
     <input type="file" id="file-input" accept="image/*" hidden />
+    <input type="file" id="video-input" accept="video/*" hidden />
     <input type="file" id="layer-input" accept="image/*" hidden />
-    <input type="file" id="replace-input" accept="image/*" hidden />
+    <input type="file" id="replace-input" accept="image/*,video/*" hidden />
     <input type="file" id="logo-input" accept="image/*" hidden />
 
     <script src="app.js"></script>

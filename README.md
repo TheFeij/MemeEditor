@@ -5,9 +5,9 @@
 <h1 align="center">Meme Editor</h1>
 
 <p align="center">
-  A fast, modern, offline meme editor. Load an image, add text, stickers, shapes and
-  brush strokes, pad it like a classic meme, and export a PNG — all from a native
-  desktop app for Windows and Linux.
+  A fast, modern, offline meme editor. Load an image or video, add text, stickers,
+  shapes and brush strokes, pad it like a classic meme, and export a PNG — or a
+  video with timed overlays — all from a native desktop app for Windows and Linux.
 </p>
 
 <p align="center">
@@ -31,8 +31,12 @@
 
 ## Features
 
-- **Start screen** — begin with an image, or an empty canvas with a custom size and background color.
+- **Start screen** — begin with an image, a video, or an empty canvas with a custom size and background color.
 - **Image input** — open a file, drag & drop from your OS, or paste from the clipboard.
+- **Video memes** — open a video, edit it exactly like an image, and give every text,
+  shape, sticker or brush stroke its own **start / end time** on a CapCut-style timeline
+  (drag a bar to retime it, drag its edges to trim, and click the ruler to scrub).
+  Export to MP4 (keeping the original audio) via ffmpeg.
 - **Image layers** — stack extra images (logos, stickers) on top of the base image, resize/rotate them, and crop them in place.
 - **Replace base image** — swap the underlying meme while keeping text, stickers and shapes in place.
 - **Text tool** — content, font, size, alignment, color and outline, with auto-fit and max-size options.
@@ -49,7 +53,8 @@
 - **Arrange** — bring forward / send backward, and delete the selected object.
 - **Undo / redo** — a full history of your edits.
 - **Themed UI** — custom dropdowns and a built-in color picker designed for the app.
-- **Export** — save the composition as a PNG via a native save dialog, remembering the last folder you used.
+- **Export** — save the composition as a PNG (image projects) or an MP4 video (video
+  projects) via a native save dialog, remembering the last folder you used.
 
 ## Download
 
@@ -66,6 +71,14 @@ Each download is a `.zip` containing the executable and an (empty) `fonts` folde
 On Linux you need `webkit2gtk`. The prebuilt binary is compiled with the
 `webkit2_41` tag, so install `webkit2gtk-4.1` (e.g. `libwebkit2gtk-4.1-0` on Debian/Ubuntu).
 On Windows the app uses the bundled WebView2 runtime (present by default on Windows 10/11).
+
+> [!NOTE]
+> **Video memes need `ffmpeg`.** Image memes work without it, but exporting a
+> video requires `ffmpeg` on your `PATH` (e.g. `sudo apt-get install ffmpeg` on
+> Debian/Ubuntu, or the build from <https://ffmpeg.org/download.html> on
+> Windows). The app calls `ffmpeg` to encode the frames and re-mux the original
+> audio track. It also needs a WebKit/GStreamer build that can decode the video
+> you open.
 
 ## Custom fonts
 
@@ -132,20 +145,22 @@ This runs `wails dev` for live reloading while you edit the frontend.
 | `E` | Ellipse |
 | `C` | Crop |
 | `I` | Eyedropper into the last color picker you opened |
+| `Space` | Play / pause a video |
 | `Delete` / `Backspace` | Delete selected object |
 | `Esc` | Cancel eyedropper / crop / image crop |
 | `Ctrl/Cmd + Z` | Undo |
 | `Ctrl/Cmd + Shift + Z` | Redo |
-| `Ctrl/Cmd + S` | Save image |
+| `Ctrl/Cmd + S` | Save image / video |
 
 ## Tech stack
 
 - **Frontend** — plain HTML, CSS and JavaScript with the HTML5 Canvas API. No framework, no bundler.
 - **Backend** — a small Go backend via [Wails](https://wails.io/) v2 that:
   - embeds and serves the frontend assets,
-  - reads image files dropped onto the window,
-  - opens a native save dialog and writes the exported PNG,
+  - reads image and video files dropped onto the window,
+  - opens a native save dialog and writes the exported PNG or MP4,
   - applies the pixel **blur** used by the blur paint mode (parallelized across all CPU cores),
+  - composites each timed object as a PNG overlay in a single `ffmpeg` pass (fast, keeps the original audio),
   - scans the drop-in `fonts` folder and hands user fonts to the frontend at runtime.
 
 ## Project structure
@@ -156,6 +171,7 @@ This runs `wails dev` for live reloading while you edit the frontend.
 ├── app.go                  # Backend: read dropped files, native save dialog, config
 ├── blur.go                 # Backend: parallel box blur for the blur paint mode
 ├── fonts.go                # Backend: runtime discovery of user fonts
+├── video.go                # Backend: ffmpeg video export session (frames in, MP4 out)
 ├── index.html              # App shell / UI
 ├── style.css               # Styling (themed controls, dropdowns, color picker)
 ├── app.js                  # Editor logic (canvas rendering, tools, history, export)

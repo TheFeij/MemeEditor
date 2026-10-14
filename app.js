@@ -53,12 +53,18 @@
     const DEFAULT_TEXT_DIRECTION = "rtl";
     const DEFAULT_RECT_RADIUS = 12;
     const DEFAULT_BLUR_RADIUS = 16;
+    const DEFAULT_VIDEO_FPS = 30;
+    const VIDEO_PATH_RE = /\.(mp4|webm|ogv|ogg|mov|m4v|mkv|avi)$/i;
+    const VIDEO_MIME_RE = /^video\//i;
 
     // Render the document at a higher internal resolution so text (and vector
     // shapes) stay crisp even when the base image is small. The long edge is
     // brought up to at least this many pixels, capped by MAX_RENDER_SCALE.
     const RENDER_TARGET = 1600;
     const MAX_RENDER_SCALE = 4;
+    // While a video is playing we render at roughly screen resolution (never
+    // supersampled) to keep playback cheap; pausing restores full crispness.
+    const PLAYBACK_MAX_SCALE = 2;
 
     const CURSORS = {
         select: "default",
@@ -86,7 +92,9 @@
     // ---------------------------------------------------------------------
 
     const state = {
+        mediaType: "image",
         baseImage: { source: null, width: 0, height: 0 },
+        video: { duration: 0, playing: false, muted: false, exportFps: DEFAULT_VIDEO_FPS },
         padding: { top: 0, right: 0, bottom: 0, left: 0 },
         background: DEFAULT_BACKGROUND,
         objects: [],
@@ -133,6 +141,46 @@
 
     // Crop tool rectangle (document coordinates). View-only until applied.
     let crop = null;
+
+    // Base video (not part of the serialisable history snapshot). `videoEl`
+    // stays alive across undo/redo; `videoBlob` lets the exporter recover the
+    // original audio track, and the object URL is revoked when it is replaced.
+    let videoEl = null;
+    let videoBlob = null;
+    let videoObjectURL = null;
+    // Filesystem path of the base video when it came from a drop or native
+    // dialog. The exporter reads this directly instead of shipping the whole
+    // file through the webview.
+    let videoPath = null;
+    let playbackRaf = null;
+    // When true, objects that are not active at the playhead are drawn faded
+    // and remain selectable, which makes editing a timed composition easier.
+    let showHiddenObjects = true;
+    // Cached ffmpeg availability (null = not checked yet).
+    let ffmpegOk = null;
+    // Timeline (video only): active clip drag/scrub and cached build state.
+    let tlInteraction = null;
+    let timelineLaneSig = "";
+    let rulerDurKey = "";
+    let timelineVisible = false;
+    const laneBars = new Map();
+    // Cache the lanes/body geometry so the playhead can move via a transform
+    // without forcing a layout read every frame.
+    const tlGeom = { valid: false, offset: 0, width: 0 };
+    let lastTimelineBarSig = "";
+    let lastTimelineBarsAt = 0;
+    // Bumped on real document changes (not on every played frame) so the
+    // timeline only rebuilds its clips when something actually changed.
+    let docRev = 0;
+    // Bumped when webfonts finish loading so cached text metrics are re-measured.
+    let fontLoadRev = 0;
+    // Text measurement is expensive (auto-fit re-measures in a loop); cache it
+    // per object until its text/style/document-width changes.
+    const textMetricsCache = new WeakMap();
+    // Every video element created this session. Replaced videos are kept alive
+    // (hidden) so that undo/redo can restore a snapshot that references them;
+    // they are all torn down when the project is reset.
+    const liveVideos = new Set();
 
     // Active alignment guides shown while placing text/objects.
     // { allV, allH, v, h } where v/h are the snapped (highlighted) lines.
@@ -261,6 +309,33 @@
     const logoChange = $("logo-change");
     const logoInput = $("logo-input");
 
+    const videoInput = $("video-input");
+    const btnOpenVideo = $("btn-open-video");
+    const startOpenVideo = $("start-open-video");
+
+    const timelineEl = $("timeline");
+    const tlPlay = $("tl-play");
+    const tlCurrent = $("tl-current");
+    const tlDuration = $("tl-duration");
+    const tlMute = $("tl-mute");
+    const tlShowHidden = $("tl-showhidden");
+    const tlBody = $("tl-body");
+    const tlRuler = $("tl-ruler");
+    const tlScroll = $("tl-scroll");
+    const tlLanes = $("tl-lanes");
+    const tlPlayhead = $("tl-playhead");
+
+    const propTime = $("prop-time");
+    const timeStart = $("time-start");
+    const timeEnd = $("time-end");
+    const timeStartHere = $("time-start-here");
+    const timeEndHere = $("time-end-here");
+    const timeWhole = $("time-whole");
+
+    const exportProgress = $("export-progress");
+    const exportProgressLabel = $("export-progress-label");
+    const exportProgressFill = $("export-progress-fill");
+
     const orderForward = $("order-forward");
     const orderBackward = $("order-backward");
     const btnDelete = $("btn-delete");
@@ -310,6 +385,62 @@
             el.style.transition = "opacity 0.25s";
             setTimeout(() => el.remove(), 260);
         }, 2200);
+    }
+
+    function errMsg(err) {
+        if (!err) return "unknown error";
+        return err.message || String(err);
+    }
+
+    // mm:ss for the timeline labels.
+    function formatTime(sec) {
+        if (!isFinite(sec) || sec < 0) sec = 0;
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        return m + ":" + String(s).padStart(2, "0");
+    }
+
+    function blobToDataURL(blob) {
+        return new Promise(function (resolve, reject) {
+            const reader = new FileReader();
+            reader.onload = function () {
+                resolve(reader.result);
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    function isVideoFile(file) {
+        if (!file) return false;
+        return VIDEO_MIME_RE.test(file.type || "") || VIDEO_PATH_RE.test(file.name || "");
+    }
+
+    function isVideoPath(path) {
+        return VIDEO_PATH_RE.test(path || "");
+    }
+
+    // Current playhead position in seconds (0 for image projects).
+    function getPlayhead() {
+        return state.mediaType === "video" && videoEl ? videoEl.currentTime || 0 : 0;
+    }
+
+    // Whether a timed object is visible at time `t`. Objects without a range
+    // are always visible; image projects ignore timing entirely.
+    function isObjectActiveAt(obj, t) {
+        if (state.mediaType !== "video") return true;
+        if (obj.tStart == null && obj.tEnd == null) return true;
+        const start = obj.tStart == null ? 0 : obj.tStart;
+        const end = obj.tEnd == null ? Infinity : obj.tEnd;
+        return t >= start - 1e-4 && t <= end + 1e-4;
+    }
+
+    // Give a freshly created object a sensible time range in video projects:
+    // it appears from the playhead and lasts until the end of the clip.
+    function applyDefaultTiming(obj) {
+        if (state.mediaType !== "video") return;
+        obj.tStart = round2(getPlayhead());
+        obj.tEnd = state.video.duration || 0;
     }
 
     function isEditingTarget(target) {
@@ -400,12 +531,11 @@
 
     function getDocPoint(event) {
         const rect = canvas.getBoundingClientRect();
-        // canvas.width is in supersampled device pixels; divide by renderScale
-        // to get the document width before mapping from CSS pixels.
-        const docWidth = canvas.width / renderScale;
-        const docHeight = canvas.height / renderScale;
-        const scaleX = docWidth / rect.width;
-        const scaleY = docHeight / rect.height;
+        // Map from CSS pixels straight to document units; this is independent
+        // of the (possibly fractional) preview render scale.
+        const size = computeDocumentSize();
+        const scaleX = size.width / rect.width;
+        const scaleY = size.height / rect.height;
         return {
             x: (event.clientX - rect.left) * scaleX,
             y: (event.clientY - rect.top) * scaleY
@@ -533,6 +663,7 @@
         };
         const preset = getDefaultPreset();
         if (preset) applyTextPreset(obj, preset);
+        applyDefaultTiming(obj);
         return obj;
     }
 
@@ -586,6 +717,27 @@
     }
 
     function getTextMetrics(obj) {
+        // Auto-fit re-measures text in a loop, which is far too expensive to
+        // repeat on every rendered frame, so cache the result until the text,
+        // style or document width changes.
+        const avail = computeDocumentSize().width;
+        const sig =
+            (obj.text || " ") +
+            "\u0000" +
+            obj.fontFamily +
+            "\u0000" +
+            obj.fontSize +
+            "\u0000" +
+            obj.maxFontSize +
+            "\u0000" +
+            (obj.autoFit ? "1" : "0") +
+            "\u0000" +
+            avail +
+            "\u0000" +
+            fontLoadRev;
+        const cached = textMetricsCache.get(obj);
+        if (cached && cached.sig === sig) return cached.metrics;
+
         const ctx = getCtx();
         const fontSize = getEffectiveFontSize(obj);
         const lineHeight = fontSize * 1.15;
@@ -595,7 +747,9 @@
         let width = 0;
         for (const line of lines) width = Math.max(width, ctx.measureText(line).width);
         ctx.restore();
-        return { fontSize, lineHeight, lines, width, height: lineHeight * lines.length };
+        const metrics = { fontSize, lineHeight, lines, width, height: lineHeight * lines.length };
+        textMetricsCache.set(obj, { sig, metrics });
+        return metrics;
     }
 
     function getTextBounds(obj) {
@@ -629,8 +783,15 @@
     }
 
     function hitTest(point) {
+        const videoMode = state.mediaType === "video";
+        const time = getPlayhead();
         for (let i = state.objects.length - 1; i >= 0; i--) {
             const o = state.objects[i];
+            if (videoMode && !isObjectActiveAt(o, time)) {
+                // Out-of-range objects are only clickable while paused in the
+                // "show all" editing mode, where they are drawn faded.
+                if (!showHiddenObjects || state.video.playing) continue;
+            }
             const b = getObjectBounds(o);
             const p = toLocalPoint(o, point);
             if (
@@ -962,9 +1123,9 @@
         if (entry && entry.bitmap && sameRegion(entry.region, info)) {
             drawBlurBitmap(ctx, obj, entry.bitmap, info);
         }
-        // (Re)compute. During an active drag/draw we throttle so we don't flood
-        // the backend, but still give progressive feedback.
-        const throttle = interaction ? 100 : 0;
+        // (Re)compute. During an active drag/draw or playback we throttle so we
+        // don't flood the backend, but still give progressive feedback.
+        const throttle = interaction || state.video.playing ? 120 : 0;
         const lastRequest = entry ? entry.lastRequest || 0 : 0;
         if ((!entry || entry.pendingKey !== key) && Date.now() - lastRequest >= throttle) {
             requestBlurBitmap(ctx, obj, key, info);
@@ -1144,7 +1305,7 @@
         if (rot) ctx.restore();
     }
 
-    function renderDocument(ctx) {
+    function renderDocument(ctx, time, preview) {
         if (blurCache.size) {
             for (const id of blurCache.keys()) {
                 if (!state.objects.some((o) => o.id === id)) blurCache.delete(id);
@@ -1157,10 +1318,29 @@
 
         const img = state.baseImage;
         if (img.source) {
-            ctx.drawImage(img.source, size.left, size.top, img.width, img.height);
+            try {
+                ctx.drawImage(img.source, size.left, size.top, img.width, img.height);
+            } catch (err) {
+                /* the current video frame may not be ready yet */
+            }
         }
 
+        const videoMode = state.mediaType === "video";
+        const t = time == null ? 0 : time;
         for (const obj of state.objects) {
+            if (videoMode) {
+                const active = isObjectActiveAt(obj, t);
+                if (!active) {
+                    // Hidden at this moment: skip it unless we are paused in
+                    // the preview and the user asked to see (faded) objects.
+                    if (!preview || state.video.playing || !showHiddenObjects) continue;
+                    ctx.save();
+                    ctx.globalAlpha *= 0.3;
+                    renderObject(ctx, obj);
+                    ctx.restore();
+                    continue;
+                }
+            }
             renderObject(ctx, obj);
         }
     }
@@ -1361,6 +1541,17 @@
         return Math.min(MAX_RENDER_SCALE, Math.ceil(RENDER_TARGET / longSide));
     }
 
+    // Scale used for the on-screen canvas. Editing uses the full (possibly
+    // supersampled) scale; playback drops to about screen resolution so every
+    // frame costs far fewer pixels.
+    function getPreviewRenderScale(size) {
+        const full = getRenderScale(size);
+        if (!(state.mediaType === "video" && state.video.playing)) return full;
+        const dpr = window.devicePixelRatio || 1;
+        const needed = (displayScale > 0 ? displayScale : 1) * dpr;
+        return clamp(needed, 0.25, Math.min(full, PLAYBACK_MAX_SCALE));
+    }
+
     function computeFitScale(width, height) {
         const availW = stage.clientWidth - 48;
         const availH = stage.clientHeight - 48;
@@ -1368,8 +1559,8 @@
         return Math.min(availW / width, availH / height, 1);
     }
 
-    function applyDisplayScale(size) {
-        const fit = computeFitScale(size.width, size.height);
+    function applyDisplayScale(size, fit) {
+        if (fit == null) fit = computeFitScale(size.width, size.height);
         displayScale = fit * zoom;
         canvas.style.width = Math.max(1, Math.round(size.width * displayScale)) + "px";
         canvas.style.height = Math.max(1, Math.round(size.height * displayScale)) + "px";
@@ -1378,17 +1569,20 @@
 
     function render() {
         const size = computeDocumentSize();
-        renderScale = getRenderScale(size);
+        // displayScale must be known before choosing the preview render scale.
+        const fit = computeFitScale(size.width, size.height);
+        displayScale = fit * zoom;
+        renderScale = getPreviewRenderScale(size);
         const w = Math.max(1, Math.round(size.width * renderScale));
         const h = Math.max(1, Math.round(size.height * renderScale));
         if (canvas.width !== w) canvas.width = w;
         if (canvas.height !== h) canvas.height = h;
 
-        applyDisplayScale(size);
+        applyDisplayScale(size, fit);
 
         const ctx = getCtx();
         ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
-        renderDocument(ctx);
+        renderDocument(ctx, getPlayhead(), true);
         updateSelectionGuides();
         drawGuides(ctx);
         drawCropOverlay(ctx);
@@ -1396,6 +1590,7 @@
         if (!imageCrop) drawSelection(ctx);
 
         updateEmptyState();
+        updateTimelineUI();
     }
 
     function setZoom(value) {
@@ -1429,10 +1624,16 @@
 
     function cloneState() {
         return {
+            mediaType: state.mediaType,
             baseImage: {
                 source: state.baseImage.source,
                 width: state.baseImage.width,
                 height: state.baseImage.height
+            },
+            video: {
+                duration: state.video.duration,
+                muted: state.video.muted,
+                exportFps: state.video.exportFps
             },
             padding: Object.assign({}, state.padding),
             background: state.background,
@@ -1445,11 +1646,38 @@
     }
 
     function applySnapshot(snap) {
+        state.mediaType = snap.mediaType || "image";
         state.baseImage = {
             source: snap.baseImage.source,
             width: snap.baseImage.width,
             height: snap.baseImage.height
         };
+        if (snap.video) {
+            state.video.duration = snap.video.duration || 0;
+            state.video.muted = !!snap.video.muted;
+            if (snap.video.exportFps) state.video.exportFps = snap.video.exportFps;
+        }
+        // Re-point the live video at whatever this snapshot referenced so a
+        // previously replaced clip becomes current again.
+        stopPlaybackLoop();
+        state.video.playing = false;
+        const src = state.baseImage.source;
+        if (state.mediaType === "video" && src && src.tagName === "VIDEO") {
+            videoEl = src;
+            videoBlob = src.__blob || null;
+            videoObjectURL = src.__objectURL || null;
+            videoPath = src.__path || null;
+            src.muted = state.video.muted;
+            src.removeEventListener("ended", onVideoEnded);
+            src.removeEventListener("seeked", onVideoSeeked);
+            src.addEventListener("ended", onVideoEnded);
+            src.addEventListener("seeked", onVideoSeeked);
+        } else {
+            videoEl = null;
+            videoBlob = null;
+            videoObjectURL = null;
+            videoPath = null;
+        }
         state.padding = Object.assign({}, snap.padding);
         state.background = snap.background;
         state.objects = snap.objects.map(cloneObject);
@@ -1458,6 +1686,7 @@
         state.currentColor = snap.currentColor;
         state.currentShapeFill = snap.currentShapeFill;
         contentRev++;
+        docRev++;
         render();
         syncUI();
     }
@@ -1470,6 +1699,7 @@
 
     function commit() {
         contentRev++;
+        docRev++;
         history = history.slice(0, historyIndex + 1);
         history.push(cloneState());
         if (history.length > MAX_HISTORY) {
@@ -1565,6 +1795,8 @@
     }
 
     function setBaseImage(img) {
+        if (videoEl) releaseVideo();
+        state.mediaType = "image";
         state.baseImage = {
             source: img,
             width: img.naturalWidth,
@@ -1576,6 +1808,538 @@
         render();
         syncUI();
         toast("Base image loaded");
+    }
+
+    // ---------------------------------------------------------------------
+    // Video loading
+    // ---------------------------------------------------------------------
+
+    function loadVideoFile(file, mode) {
+        if (!file) return;
+        if (!isVideoFile(file)) {
+            toast("Unsupported file type", "error");
+            return;
+        }
+        loadVideoBlob(file, mode, null);
+    }
+
+    function loadVideoPath(path, mode) {
+        if (!hasBackend()) return;
+        window.go.main.App.ReadMediaFile(path)
+            .then(function (dataURL) {
+                return fetch(dataURL).then(function (res) {
+                    return res.blob();
+                });
+            })
+            .then(function (blob) {
+                loadVideoBlob(blob, mode, path);
+            })
+            .catch(function () {
+                toast("Could not read video file", "error");
+            });
+    }
+
+    // Open a video through a native dialog when the backend is available so we
+    // know its path; otherwise fall back to a normal file input.
+    function openVideoPicker(mode) {
+        if (hasBackend() && window.go.main.App.PickVideoFile) {
+            window.go.main.App.PickVideoFile()
+                .then(function (path) {
+                    if (path) loadVideoPath(path, mode || "auto");
+                })
+                .catch(function () {
+                    toast("Could not open video", "error");
+                });
+            return;
+        }
+        videoInput.click();
+    }
+
+    function loadVideoBlob(blob, mode, path) {
+        const url = URL.createObjectURL(blob);
+        const video = document.createElement("video");
+        video.preload = "auto";
+        video.playsInline = true;
+        video.className = "video-source";
+        video.setAttribute("playsinline", "");
+        video.src = url;
+        // Kept in the DOM (hidden) so WebKit keeps decoding frames for the
+        // canvas; a detached element can be deprioritised and stall seeking.
+        stage.appendChild(video);
+
+        const cleanup = function () {
+            video.removeEventListener("loadedmetadata", onMeta);
+            video.removeEventListener("error", onErr);
+        };
+        const onMeta = function () {
+            cleanup();
+            if (!video.videoWidth || !video.videoHeight) {
+                URL.revokeObjectURL(url);
+                video.remove();
+                toast("Video has no dimensions", "error");
+                return;
+            }
+            setBaseVideo(video, blob, url, mode, path);
+        };
+        const onErr = function () {
+            cleanup();
+            URL.revokeObjectURL(url);
+            video.remove();
+            toast("Could not read video file", "error");
+        };
+        video.addEventListener("loadedmetadata", onMeta);
+        video.addEventListener("error", onErr);
+    }
+
+    function setBaseVideo(video, blob, url, mode, path) {
+        if (videoEl) releaseVideo(false);
+        video.__blob = blob || null;
+        video.__objectURL = url;
+        video.__path = path || null;
+        liveVideos.add(video);
+        videoEl = video;
+        videoBlob = blob || null;
+        videoObjectURL = url;
+        videoPath = path || null;
+        video.muted = state.video.muted;
+        video.addEventListener("ended", onVideoEnded);
+        video.addEventListener("seeked", onVideoSeeked);
+
+        state.mediaType = "video";
+        state.video = {
+            duration: isFinite(video.duration) ? video.duration : 0,
+            playing: false,
+            muted: video.muted,
+            exportFps: state.video.exportFps || DEFAULT_VIDEO_FPS
+        };
+        state.baseImage = {
+            source: video,
+            width: video.videoWidth,
+            height: video.videoHeight
+        };
+        state.selectedObjectId = null;
+        showHiddenObjects = true;
+        if (tlShowHidden) tlShowHidden.checked = true;
+        markStarted();
+        commit();
+        render();
+        syncUI();
+        toast("Video loaded · " + formatTime(state.video.duration));
+    }
+
+    function disposeVideoElement(v) {
+        try {
+            v.pause();
+        } catch (err) {
+            /* ignore */
+        }
+        v.removeEventListener("ended", onVideoEnded);
+        v.removeEventListener("seeked", onVideoSeeked);
+        try {
+            v.removeAttribute("src");
+            v.load();
+        } catch (err) {
+            /* ignore */
+        }
+        if (v.parentNode) v.parentNode.removeChild(v);
+        if (v.__objectURL) URL.revokeObjectURL(v.__objectURL);
+        v.__objectURL = null;
+        v.__blob = null;
+    }
+
+    // `dispose` fully tears the element down; otherwise it is kept alive so a
+    // history snapshot referencing it can still be restored by undo.
+    function releaseVideo(dispose) {
+        pauseVideo();
+        const v = videoEl;
+        if (v) {
+            if (dispose) {
+                disposeVideoElement(v);
+                liveVideos.delete(v);
+            } else {
+                v.removeEventListener("ended", onVideoEnded);
+                v.removeEventListener("seeked", onVideoSeeked);
+            }
+        }
+        videoEl = null;
+        videoBlob = null;
+        videoObjectURL = null;
+        videoPath = null;
+    }
+
+    function disposeAllVideos() {
+        stopPlaybackLoop();
+        state.video.playing = false;
+        liveVideos.forEach(disposeVideoElement);
+        liveVideos.clear();
+        videoEl = null;
+        videoBlob = null;
+        videoObjectURL = null;
+        videoPath = null;
+    }
+
+    function onVideoEnded() {
+        state.video.playing = false;
+        stopPlaybackLoop();
+        updateTimelineUI();
+        render();
+    }
+
+    // A seek can finish after our immediate redraw, so refresh once the frame
+    // is actually decoded (this is what makes scrubbing/jumping reliable).
+    function onVideoSeeked() {
+        requestRender();
+    }
+
+    function playVideo() {
+        if (!videoEl) return;
+        const dur = state.video.duration || 0;
+        // Restart from the beginning if playback previously reached the end,
+        // otherwise play() would immediately fire "ended" again.
+        if (dur > 0 && videoEl.currentTime >= dur - 0.05) {
+            try {
+                videoEl.currentTime = 0;
+            } catch (err) {
+                /* ignore */
+            }
+        }
+        state.video.playing = true;
+        const p = videoEl.play();
+        if (p && typeof p.catch === "function") {
+            p.catch(function () {
+                state.video.playing = false;
+                updateTimelineUI();
+            });
+        }
+        startPlaybackLoop();
+        requestRender();
+    }
+
+    function pauseVideo() {
+        const wasPlaying = state.video.playing;
+        state.video.playing = false;
+        if (videoEl) videoEl.pause();
+        stopPlaybackLoop();
+        updateTimelineUI();
+        // Leaving playback restores the full-resolution canvas.
+        if (wasPlaying) render();
+    }
+
+    function togglePlay() {
+        if (state.mediaType !== "video" || !videoEl) return;
+        if (state.video.playing) pauseVideo();
+        else playVideo();
+    }
+
+    function toggleMute() {
+        if (state.mediaType !== "video") return;
+        state.video.muted = !state.video.muted;
+        if (videoEl) videoEl.muted = state.video.muted;
+        updateTimelineUI();
+    }
+
+    // Redraw on each newly presented video frame (requestVideoFrameCallback),
+    // falling back to animation frames where it is unavailable. This avoids
+    // wasted renders and keeps overlays locked to the picture.
+    function startPlaybackLoop() {
+        if (playbackRaf != null) return;
+        const step = function () {
+            if (!state.video.playing) {
+                playbackRaf = null;
+                return;
+            }
+            // The pixels beneath blur objects change every frame.
+            contentRev++;
+            try {
+                render();
+            } catch (err) {
+                // A single bad frame must not kill the playback loop.
+            }
+            if (videoEl && videoEl.requestVideoFrameCallback) {
+                playbackRaf = videoEl.requestVideoFrameCallback(step);
+            } else {
+                playbackRaf = requestAnimationFrame(step);
+            }
+        };
+        if (videoEl && videoEl.requestVideoFrameCallback) {
+            playbackRaf = videoEl.requestVideoFrameCallback(step);
+        } else {
+            playbackRaf = requestAnimationFrame(step);
+        }
+    }
+
+    function stopPlaybackLoop() {
+        if (playbackRaf == null) return;
+        if (videoEl && videoEl.cancelVideoFrameCallback) {
+            try {
+                videoEl.cancelVideoFrameCallback(playbackRaf);
+            } catch (err) {
+                /* the handle may belong to rAF instead */
+            }
+        }
+        try {
+            cancelAnimationFrame(playbackRaf);
+        } catch (err) {
+            /* ignore */
+        }
+        playbackRaf = null;
+    }
+
+    function seekTo(t) {
+        if (!videoEl) return;
+        const dur = state.video.duration || 0;
+        t = clamp(t, 0, dur);
+        try {
+            videoEl.currentTime = t;
+        } catch (err) {
+            /* ignore */
+        }
+        requestRender();
+        updateTimelineUI();
+    }
+
+    // ---------------------------------------------------------------------
+    // Timeline (video projects)
+    // ---------------------------------------------------------------------
+
+    function chooseRulerStep(dur) {
+        const target = dur / 10;
+        const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
+        for (const s of steps) {
+            if (s >= target) return s;
+        }
+        return 300;
+    }
+
+    function formatTick(sec) {
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        if (m <= 0) return (Math.round(s * 10) / 10) + "s";
+        return m + ":" + String(Math.floor(s)).padStart(2, "0");
+    }
+
+    function renderTimelineRuler() {
+        const dur = state.video.duration || 0;
+        tlRuler.innerHTML = "";
+        if (dur <= 0) return;
+        const step = chooseRulerStep(dur);
+        for (let t = 0; t <= dur + 1e-6; t += step) {
+            const tick = document.createElement("div");
+            tick.className = "tl-tick";
+            tick.style.left = (t / dur) * 100 + "%";
+            if (t > 1e-6) {
+                const label = document.createElement("span");
+                label.className = "tl-tick-label";
+                label.textContent = formatTick(t);
+                tick.appendChild(label);
+            }
+            tlRuler.appendChild(tick);
+        }
+    }
+
+    function clipLabel(obj) {
+        if (obj.type === "text") {
+            const t = (obj.text || "").replace(/\s+/g, " ").trim();
+            return t ? "T  " + (t.length > 20 ? t.slice(0, 20) + "…" : t) : "Text";
+        }
+        const names = { rect: "Rectangle", ellipse: "Ellipse", image: "Image", brush: "Brush" };
+        return names[obj.type] || obj.type;
+    }
+
+    // Rebuild the lane DOM only when the object set changes.
+    function buildTimelineLanes() {
+        const sig = state.objects.map((o) => o.id).join(",");
+        if (sig === timelineLaneSig) return;
+        timelineLaneSig = sig;
+        laneBars.clear();
+        tlLanes.innerHTML = "";
+        for (let i = state.objects.length - 1; i >= 0; i--) {
+            const obj = state.objects[i];
+            const lane = document.createElement("div");
+            lane.className = "tl-lane";
+            const bar = document.createElement("div");
+            bar.className = "tl-clip clip-" + obj.type;
+            bar.dataset.id = obj.id;
+            bar.innerHTML =
+                '<div class="tl-handle tl-handle-l"></div>' +
+                '<div class="tl-clip-body"><span class="tl-clip-label"></span></div>' +
+                '<div class="tl-handle tl-handle-r"></div>';
+            lane.appendChild(bar);
+            tlLanes.appendChild(lane);
+            laneBars.set(obj.id, bar);
+        }
+    }
+
+    function updateTimelineBars() {
+        const dur = state.video.duration || 0;
+        const denom = dur > 0 ? dur : 1;
+        for (const obj of state.objects) {
+            const bar = laneBars.get(obj.id);
+            if (!bar) continue;
+            const s = clamp(obj.tStart == null ? 0 : obj.tStart, 0, dur);
+            const e = clamp(obj.tEnd == null ? dur : obj.tEnd, 0, dur);
+            bar.style.left = (s / denom) * 100 + "%";
+            bar.style.width = (Math.max(0, e - s) / denom) * 100 + "%";
+            bar.classList.toggle("selected", obj.id === state.selectedObjectId);
+            bar.classList.toggle("active-now", isObjectActiveAt(obj, getPlayhead()));
+            const label = bar.querySelector(".tl-clip-label");
+            if (label) label.textContent = clipLabel(obj);
+        }
+    }
+
+    function measureTimelineGeometry() {
+        if (!timelineVisible) {
+            tlGeom.valid = false;
+            return;
+        }
+        const lanesRect = tlLanes.getBoundingClientRect();
+        const bodyRect = tlBody.getBoundingClientRect();
+        tlGeom.offset = lanesRect.left - bodyRect.left;
+        tlGeom.width = lanesRect.width;
+        tlGeom.valid = true;
+    }
+
+    function updatePlayhead() {
+        if (!tlGeom.valid) measureTimelineGeometry();
+        const dur = state.video.duration || 0;
+        const pct = dur > 0 ? clamp(getPlayhead() / dur, 0, 1) : 0;
+        const x = tlGeom.offset + pct * tlGeom.width;
+        tlPlayhead.style.transform = "translateX(" + x + "px)";
+    }
+
+    function updateTimelineUI() {
+        const isVideo = state.mediaType === "video" && !!videoEl;
+        if (isVideo !== timelineVisible) {
+            timelineVisible = isVideo;
+            tlGeom.valid = false;
+            timelineEl.classList.toggle("hidden", !isVideo);
+            if (isVideo) measureTimelineGeometry();
+            // The stage height changed: refit on the next frame.
+            requestRender();
+        }
+        if (!isVideo) return;
+
+        const dur = state.video.duration || 0;
+        tlCurrent.textContent = formatTime(getPlayhead());
+        tlDuration.textContent = formatTime(dur);
+        tlPlay.textContent = state.video.playing ? "⏸" : "▶";
+        tlMute.textContent = state.video.muted ? "🔇" : "🔊";
+
+        const key = dur.toFixed(2);
+        if (key !== rulerDurKey) {
+            rulerDurKey = key;
+            timelineLaneSig = "";
+            renderTimelineRuler();
+        }
+
+        // The clips only change when the document or selection changes; refresh
+        // them then, or on a slow timer to update the "active now" highlight.
+        const sig = docRev + "|" + (state.selectedObjectId || "");
+        const now = performance.now();
+        if (sig !== lastTimelineBarSig || now - lastTimelineBarsAt > 150) {
+            lastTimelineBarSig = sig;
+            lastTimelineBarsAt = now;
+            buildTimelineLanes();
+            updateTimelineBars();
+        }
+        updatePlayhead();
+    }
+
+    function scrubFromClientX(clientX) {
+        const rect = tlLanes.getBoundingClientRect();
+        if (rect.width <= 0) return;
+        const pct = clamp((clientX - rect.left) / rect.width, 0, 1);
+        seekTo(pct * (state.video.duration || 0));
+    }
+
+    function onTimelinePointerDown(e) {
+        if (state.mediaType !== "video" || !videoEl || e.button !== 0) return;
+        const rect = tlLanes.getBoundingClientRect();
+        const clip = e.target.closest ? e.target.closest(".tl-clip") : null;
+        if (clip && rect.width > 0) {
+            const obj = state.objects.find((o) => o.id === clip.dataset.id);
+            if (!obj) return;
+            state.selectedObjectId = obj.id;
+            const dur = state.video.duration || 0;
+            const handle = e.target.closest(".tl-handle");
+            let kind = "moveTime";
+            if (handle) kind = handle.classList.contains("tl-handle-l") ? "trimL" : "trimR";
+            tlInteraction = {
+                kind: kind,
+                object: obj,
+                startX: e.clientX,
+                width: rect.width,
+                origStart: obj.tStart == null ? 0 : obj.tStart,
+                origEnd: obj.tEnd == null ? dur : obj.tEnd
+            };
+            try {
+                tlBody.setPointerCapture(e.pointerId);
+            } catch (err) {
+                /* best effort */
+            }
+            render();
+            syncUI();
+            e.preventDefault();
+            return;
+        }
+        // Ruler, playhead or empty area: move the playhead.
+        if (e.clientX > rect.right) return; // clicked the scrollbar
+        tlInteraction = { kind: "scrub" };
+        try {
+            tlBody.setPointerCapture(e.pointerId);
+        } catch (err) {
+            /* best effort */
+        }
+        scrubFromClientX(e.clientX);
+        e.preventDefault();
+    }
+
+    function onTimelinePointerMove(e) {
+        if (!tlInteraction) return;
+        if (tlInteraction.kind === "scrub") {
+            scrubFromClientX(e.clientX);
+            return;
+        }
+        const it = tlInteraction;
+        const obj = it.object;
+        const dur = state.video.duration || 0;
+        if (it.width <= 0 || dur <= 0) return;
+        const dT = ((e.clientX - it.startX) / it.width) * dur;
+        const minLen = Math.min(0.05, dur);
+
+        if (it.kind === "moveTime") {
+            const len = it.origEnd - it.origStart;
+            const s = clamp(it.origStart + dT, 0, Math.max(0, dur - len));
+            obj.tStart = round2(s);
+            obj.tEnd = round2(s + len);
+            seekTo(obj.tStart);
+        } else if (it.kind === "trimL") {
+            const s = clamp(it.origStart + dT, 0, it.origEnd - minLen);
+            obj.tStart = round2(s);
+            seekTo(obj.tStart);
+        } else if (it.kind === "trimR") {
+            const v = clamp(it.origEnd + dT, it.origStart + minLen, dur);
+            obj.tEnd = round2(v);
+            seekTo(obj.tEnd);
+        }
+        if (obj.id === state.selectedObjectId) {
+            timeStart.value = round2(obj.tStart == null ? 0 : obj.tStart);
+            timeEnd.value = round2(obj.tEnd == null ? dur : obj.tEnd);
+        }
+        updateTimelineBars();
+        requestRender();
+    }
+
+    function onTimelinePointerUp(e) {
+        if (!tlInteraction) return;
+        const kind = tlInteraction.kind;
+        tlInteraction = null;
+        if (kind !== "scrub") {
+            commit();
+            render();
+        }
+        syncUI();
+        e.preventDefault();
     }
 
     // ---------------------------------------------------------------------
@@ -1636,6 +2400,10 @@
 
     // Throw everything away and return to the start screen.
     function resetProject() {
+        disposeAllVideos();
+        hideExportProgress();
+        state.mediaType = "image";
+        state.video = { duration: 0, playing: false, muted: false, exportFps: state.video.exportFps || DEFAULT_VIDEO_FPS };
         state.baseImage = { source: null, width: 0, height: 0 };
         state.padding = { top: 0, right: 0, bottom: 0, left: 0 };
         state.background = DEFAULT_BACKGROUND;
@@ -1654,6 +2422,10 @@
         crop = null;
         imageCrop = null;
         interaction = null;
+        tlInteraction = null;
+        timelineLaneSig = "";
+        rulerDurKey = "";
+        laneBars.clear();
         zoom = 1;
         blurCache.clear();
 
@@ -1705,6 +2477,7 @@
             height: Math.round(h),
             opacity: 1
         };
+        applyDefaultTiming(obj);
         state.objects.push(obj);
         state.selectedObjectId = obj.id;
         state.activeTool = "select";
@@ -1774,6 +2547,7 @@
             opacity: 1,
             rotation: 0
         };
+        applyDefaultTiming(obj);
         state.objects.push(obj);
         state.selectedObjectId = obj.id;
         state.activeTool = "select";
@@ -1975,6 +2749,7 @@
                 return ensureFontLoaded(f.family);
             });
             Promise.all(loads).then(function () {
+                fontLoadRev++;
                 render();
                 syncUI();
             });
@@ -1986,6 +2761,10 @@
     // ---------------------------------------------------------------------
 
     function setActiveTool(tool) {
+        if (tool === "crop" && state.mediaType === "video") {
+            toast("Cropping video isn't supported", "error");
+            return;
+        }
         if (tool === "crop" && !state.baseImage.source) {
             toast("Open an image before cropping", "error");
             return;
@@ -2063,10 +2842,20 @@
         propCrop.classList.toggle("hidden", !cropping);
         propOrder.classList.toggle("hidden", !obj || cropping);
         propTransform.classList.toggle("hidden", !obj || cropping);
+        propTime.classList.toggle("hidden", !(obj && state.mediaType === "video" && !cropping));
 
         placeArrangeSection(obj ? obj.type : null);
 
         if (obj) updateRotationUI(obj);
+
+        if (obj && state.mediaType === "video") {
+            const dur = state.video.duration || 0;
+            timeStart.value = round2(obj.tStart == null ? 0 : obj.tStart);
+            timeEnd.value = round2(obj.tEnd == null ? dur : obj.tEnd);
+        }
+
+        btnSave.textContent = state.mediaType === "video" ? "Save Video" : "Save Image";
+        btnReplace.textContent = state.mediaType === "video" ? "Replace Video" : "Replace Image";
 
         const cropReady = !!crop && crop.width >= 2 && crop.height >= 2;
         cropApply.disabled = !cropReady;
@@ -2224,6 +3013,7 @@
                 mode: state.brush.mode,
                 blurRadius: state.brush.blurRadius
             };
+            applyDefaultTiming(stroke);
             state.objects.push(stroke);
             state.selectedObjectId = stroke.id;
             interaction = { kind: "brush", object: stroke };
@@ -2257,6 +3047,7 @@
                 mode: state.currentShapeMode,
                 blurRadius: state.currentShapeBlur
             };
+            applyDefaultTiming(shape);
             state.objects.push(shape);
             state.selectedObjectId = shape.id;
             interaction = { kind: "create", object: shape, start: p };
@@ -2940,7 +3731,7 @@
         // in-JS blur there; the Go blur is for the interactive preview.
         exporting = true;
         try {
-            renderDocument(octx);
+            renderDocument(octx, getPlayhead(), false);
         } finally {
             exporting = false;
         }
@@ -2955,7 +3746,8 @@
                 reader.onload = function () {
                     window.go.main.App.SaveImage(reader.result)
                         .then(function (saved) {
-                            if (saved) toast("Saved " + saved);
+            if (saved) toast("Saved " + saved);
+            else toast("Export cancelled");
                         })
                         .catch(function (err) {
                             toast("Save failed: " + err, "error");
@@ -2977,6 +3769,168 @@
             setTimeout(() => URL.revokeObjectURL(url), 1000);
             toast("Saved meme.png");
         }, "image/png");
+    }
+
+    // The Save button/ shortcut routes to a still PNG for image projects and a
+    // full video export for video projects.
+    function exportMedia() {
+        if (state.mediaType === "video") exportVideo();
+        else exportImage();
+    }
+
+    function showExportProgress(fraction, label) {
+        exportProgress.classList.remove("hidden");
+        if (label) exportProgressLabel.textContent = label;
+        if (fraction == null) {
+            exportProgress.classList.add("indeterminate");
+        } else {
+            exportProgress.classList.remove("indeterminate");
+            exportProgressFill.style.width = Math.round(clamp(fraction, 0, 1) * 100) + "%";
+        }
+    }
+
+    function hideExportProgress() {
+        exportProgress.classList.add("hidden");
+        exportProgress.classList.remove("indeterminate");
+        exportProgressFill.style.width = "0%";
+    }
+
+    function isBlurObject(obj) {
+        return (
+            !!obj &&
+            obj.mode === "blur" &&
+            (obj.type === "rect" || obj.type === "ellipse" || obj.type === "brush")
+        );
+    }
+
+    // Render a single object to a transparent full-document PNG. Objects are
+    // static, so one image per object plus a time window is all ffmpeg needs.
+    function renderObjectPng(obj) {
+        const size = computeDocumentSize();
+        const off = document.createElement("canvas");
+        off.width = Math.max(1, Math.round(size.width));
+        off.height = Math.max(1, Math.round(size.height));
+        renderObject(off.getContext("2d"), obj);
+        return off.toDataURL("image/png");
+    }
+
+    // A black-and-white mask for a background-blur object: white where the
+    // shape is, black elsewhere. ffmpeg blurs the frame and composites it back
+    // through this mask.
+    function renderBlurMaskPng(obj) {
+        const size = computeDocumentSize();
+        const off = document.createElement("canvas");
+        off.width = Math.max(1, Math.round(size.width));
+        off.height = Math.max(1, Math.round(size.height));
+        const ctx = off.getContext("2d");
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, off.width, off.height);
+        const rot = obj.rotation || 0;
+        ctx.save();
+        if (rot) {
+            const c = getObjectCenter(obj);
+            ctx.translate(c.x, c.y);
+            ctx.rotate((rot * Math.PI) / 180);
+            ctx.translate(-c.x, -c.y);
+        }
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        objectPath(ctx, obj);
+        ctx.fill();
+        ctx.restore();
+        return off.toDataURL("image/png");
+    }
+
+    // Export by handing the source clip plus one time-windowed PNG per object
+    // to ffmpeg, which decodes the video once and encodes it once.
+    async function exportVideo() {
+        if (state.mediaType !== "video" || !videoEl) {
+            toast("Open a video first", "error");
+            return;
+        }
+        if (exporting) {
+            toast("An export is already running", "error");
+            return;
+        }
+        if (!hasBackend() || !window.go.main.App.ExportVideo) {
+            toast("Video export needs the desktop app", "error");
+            return;
+        }
+        pauseVideo();
+
+        if (ffmpegOk === null) {
+            try {
+                ffmpegOk = await window.go.main.App.FFmpegAvailable();
+            } catch (err) {
+                ffmpegOk = true;
+            }
+        }
+        if (!ffmpegOk) {
+            toast("ffmpeg is required to export video and was not found", "error");
+            return;
+        }
+
+        const size = computeDocumentSize();
+        const duration = state.video.duration || 0;
+        if (!isFinite(duration) || duration <= 0) {
+            toast("This video has no usable duration", "error");
+            return;
+        }
+
+        // One overlay per object, in z-order.
+        const layers = [];
+        for (const obj of state.objects) {
+            const start = obj.tStart == null ? 0 : obj.tStart;
+            let end = obj.tEnd == null ? duration : obj.tEnd;
+            if (end > duration) end = duration;
+            if (end <= start) continue;
+            if (isBlurObject(obj)) {
+                layers.push({
+                    image: renderBlurMaskPng(obj),
+                    start: start,
+                    end: end,
+                    blur: Math.round(obj.blurRadius || DEFAULT_BLUR_RADIUS)
+                });
+            } else {
+                layers.push({ image: renderObjectPng(obj), start: start, end: end, blur: 0 });
+            }
+        }
+
+        let sourcePath = videoPath || "";
+        let sourceData = "";
+        if (!sourcePath) {
+            if (!videoBlob) {
+                toast("Missing video source", "error");
+                return;
+            }
+            sourceData = await blobToDataURL(videoBlob);
+        }
+
+        exporting = true;
+        showExportProgress(null, "Exporting video…");
+        try {
+            const saved = await window.go.main.App.ExportVideo({
+                sourcePath: sourcePath,
+                sourceData: sourceData,
+                width: Math.round(size.width),
+                height: Math.round(size.height),
+                padLeft: size.left,
+                padTop: size.top,
+                background: state.background,
+                fps: state.video.exportFps || DEFAULT_VIDEO_FPS,
+                duration: duration,
+                filename: "meme.mp4",
+                layers: layers
+            });
+            if (saved) toast("Saved " + saved);
+        } catch (err) {
+            toast("Video export failed: " + errMsg(err), "error");
+        } finally {
+            exporting = false;
+            hideExportProgress();
+            render();
+            syncUI();
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -3452,6 +4406,52 @@
             setZoom(1);
         });
 
+        // Video timeline
+        tlPlay.addEventListener("click", togglePlay);
+        tlMute.addEventListener("click", toggleMute);
+        tlShowHidden.addEventListener("change", function () {
+            showHiddenObjects = tlShowHidden.checked;
+            render();
+            syncUI();
+        });
+        tlBody.addEventListener("pointerdown", onTimelinePointerDown);
+        tlBody.addEventListener("pointermove", onTimelinePointerMove);
+        tlBody.addEventListener("pointerup", onTimelinePointerUp);
+        tlBody.addEventListener("pointercancel", onTimelinePointerUp);
+
+        // Object timing (video projects)
+        timeStart.addEventListener("change", applyTimingInputs);
+        timeEnd.addEventListener("change", applyTimingInputs);
+        timeStartHere.addEventListener("click", function () {
+            const obj = getSelectedObject();
+            if (!obj || state.mediaType !== "video") return;
+            const dur = state.video.duration || 0;
+            obj.tStart = round2(clamp(getPlayhead(), 0, dur));
+            if (obj.tEnd == null || obj.tStart > obj.tEnd) obj.tEnd = dur;
+            commit();
+            render();
+            syncUI();
+        });
+        timeEndHere.addEventListener("click", function () {
+            const obj = getSelectedObject();
+            if (!obj || state.mediaType !== "video") return;
+            const dur = state.video.duration || 0;
+            obj.tEnd = round2(clamp(getPlayhead(), 0, dur));
+            if (obj.tStart == null || obj.tEnd < obj.tStart) obj.tStart = 0;
+            commit();
+            render();
+            syncUI();
+        });
+        timeWhole.addEventListener("click", function () {
+            const obj = getSelectedObject();
+            if (!obj || state.mediaType !== "video") return;
+            obj.tStart = 0;
+            obj.tEnd = state.video.duration || 0;
+            commit();
+            render();
+            syncUI();
+        });
+
         // Logo quick access
         logoPlace.addEventListener("click", placeLogo);
         logoChange.addEventListener("click", function () {
@@ -3475,6 +4475,7 @@
             { passive: false }
         );
         window.addEventListener("resize", function () {
+            tlGeom.valid = false;
             render();
         });
 
@@ -3494,14 +4495,16 @@
 
         // File inputs
         btnOpen.addEventListener("click", () => fileInput.click());
+        btnOpenVideo.addEventListener("click", () => openVideoPicker("auto"));
         emptyOpen.addEventListener("click", () => fileInput.click());
         btnReplace.addEventListener("click", () => replaceInput.click());
-        btnSave.addEventListener("click", exportImage);
+        btnSave.addEventListener("click", exportMedia);
         btnUndo.addEventListener("click", undo);
         btnRedo.addEventListener("click", redo);
 
         // Start screen
         startOpen.addEventListener("click", () => fileInput.click());
+        startOpenVideo.addEventListener("click", () => openVideoPicker("auto"));
         startEmpty.addEventListener("click", startEmptyCanvas);
         [startWidth, startHeight].forEach(function (input) {
             input.addEventListener("change", schedulePersistPreferences);
@@ -3531,12 +4534,18 @@
             loadImageFile(e.target.files[0], "auto");
             e.target.value = "";
         });
+        videoInput.addEventListener("change", function (e) {
+            loadVideoFile(e.target.files[0], "auto");
+            e.target.value = "";
+        });
         layerInput.addEventListener("change", function (e) {
             loadImageFile(e.target.files[0], "layer");
             e.target.value = "";
         });
         replaceInput.addEventListener("change", function (e) {
-            loadImageFile(e.target.files[0], "replace");
+            const file = e.target.files[0];
+            if (isVideoFile(file)) loadVideoFile(file, "replace");
+            else loadImageFile(file, "replace");
             e.target.value = "";
         });
 
@@ -3555,20 +4564,30 @@
             dropOverlay.classList.remove("visible");
             if (hasBackend()) return;
             const files = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
-            const file = files.find(isImageFile);
-            if (file) loadImageFile(file, "auto");
-            else toast("No image found in drop", "error");
+            const file = files.find(function (f) {
+                return isImageFile(f) || isVideoFile(f);
+            });
+            if (!file) {
+                toast("No image or video found in drop", "error");
+                return;
+            }
+            if (isVideoFile(file)) loadVideoFile(file, "auto");
+            else loadImageFile(file, "auto");
         });
 
         if (window.runtime && typeof window.runtime.OnFileDrop === "function") {
             window.runtime.OnFileDrop(function (x, y, paths) {
                 dropOverlay.classList.remove("visible");
-                const images = (paths || []).filter(isImagePath);
-                if (!images.length) {
-                    toast("No image found in drop", "error");
+                const media = (paths || []).filter(function (p) {
+                    return isImagePath(p) || isVideoPath(p);
+                });
+                if (!media.length) {
+                    toast("No image or video found in drop", "error");
                     return;
                 }
-                loadImagePath(images[0], "auto");
+                const path = media[0];
+                if (isVideoPath(path)) loadVideoPath(path, "auto");
+                else loadImagePath(path, "auto");
             }, false);
         }
 
@@ -3603,10 +4622,18 @@
             }
             if (mod && key === "s") {
                 e.preventDefault();
-                exportImage();
+                exportMedia();
                 return;
             }
             if (mod) return;
+
+            if (key === " " || key === "spacebar") {
+                if (state.mediaType === "video") {
+                    e.preventDefault();
+                    togglePlay();
+                }
+                return;
+            }
 
             if (key === "escape") {
                 if (!confirmOverlay.classList.contains("hidden")) {
@@ -3693,6 +4720,21 @@
         bgColor.value = color;
         commit();
         render();
+    }
+
+    // Apply the Timing number inputs to the selected object.
+    function applyTimingInputs() {
+        const obj = getSelectedObject();
+        if (!obj || state.mediaType !== "video") return;
+        const dur = state.video.duration || 0;
+        let start = clamp(parseFloat(timeStart.value) || 0, 0, dur);
+        let end = clamp(parseFloat(timeEnd.value) || 0, 0, dur);
+        if (end < start) end = start;
+        obj.tStart = round2(start);
+        obj.tEnd = round2(end);
+        commit();
+        render();
+        syncUI();
     }
 
     // ---------------------------------------------------------------------
@@ -4402,6 +5444,7 @@
                 initFonts();
                 if (document.fonts && document.fonts.ready) {
                     document.fonts.ready.then(function () {
+                        fontLoadRev++;
                         render();
                     });
                 }
