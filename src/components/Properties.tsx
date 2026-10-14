@@ -44,6 +44,20 @@ function commitKey(obj: EditorObject, patch: Partial<EditorObject>): string {
   return `${obj.id}:${Object.keys(patch).sort().join(",")}`;
 }
 
+function OrderButtons() {
+  const { bringForward, sendBackward } = useEditor();
+  return (
+    <div className="row gap order-bar">
+      <button id="order-forward" className="btn btn-sm" type="button" onClick={bringForward}>
+        Bring forward
+      </button>
+      <button id="order-backward" className="btn btn-sm" type="button" onClick={sendBackward}>
+        Send backward
+      </button>
+    </div>
+  );
+}
+
 function TextProperties({ obj }: { obj: EditorObject }) {
   const { updateObject, commit, fontFamilies } = useEditor();
 
@@ -68,6 +82,7 @@ function TextProperties({ obj }: { obj: EditorObject }) {
           onChange={(v) => set({ text: v })}
         />
       </div>
+      <OrderButtons />
       <div className="field">
         <label>Font</label>
         <Select
@@ -205,6 +220,20 @@ function TextProperties({ obj }: { obj: EditorObject }) {
   );
 }
 
+// The style fields a preset captures from the current text object.
+function styleFromObject(obj: EditorObject): Omit<TextPreset, "id" | "name"> {
+  return {
+    fontFamily: obj.fontFamily ?? DEFAULT_FONT,
+    maxFontSize: obj.maxFontSize || obj.fontSize || 48,
+    align: obj.align ?? "center",
+    direction: obj.direction ?? DEFAULT_TEXT_DIRECTION,
+    color: obj.color ?? "#ffffff",
+    outlineColor: obj.outlineColor ?? "#000000",
+    outlineWidth: obj.outlineWidth ?? 4,
+    outlineEnabled: !!obj.outlineEnabled,
+  };
+}
+
 function TextPresets({ obj }: { obj: EditorObject }) {
   const { state, dispatch, updateObject, commit } = useEditor();
   const { toast } = useToast();
@@ -220,20 +249,13 @@ function TextPresets({ obj }: { obj: EditorObject }) {
 
   const selected = state.textPresets.find((p) => p.id === presetId) ?? null;
 
-  const saveCurrent = () => {
+  const saveNew = () => {
     const presetName =
       name.trim() || `Preset ${state.textPresets.length + 1}`;
     const preset: TextPreset = {
       id: uid(),
       name: presetName,
-      fontFamily: obj.fontFamily ?? DEFAULT_FONT,
-      maxFontSize: obj.maxFontSize || obj.fontSize || 48,
-      align: obj.align ?? "center",
-      direction: obj.direction ?? DEFAULT_TEXT_DIRECTION,
-      color: obj.color ?? "#ffffff",
-      outlineColor: obj.outlineColor ?? "#000000",
-      outlineWidth: obj.outlineWidth ?? 4,
-      outlineEnabled: !!obj.outlineEnabled,
+      ...styleFromObject(obj),
     };
     dispatch({ type: "addTextPreset", preset });
     setPresetId(preset.id);
@@ -251,19 +273,13 @@ function TextPresets({ obj }: { obj: EditorObject }) {
     toast(`Applied "${selected.name}"`);
   };
 
-  const rename = () => {
+  const updateCurrent = () => {
     if (!selected) {
       toast("No preset selected", "error");
       return;
     }
-    const next = name.trim();
-    if (!next) {
-      toast("Enter a new name", "error");
-      return;
-    }
-    dispatch({ type: "updateTextPreset", id: selected.id, patch: { name: next } });
-    setName("");
-    toast("Preset renamed");
+    dispatch({ type: "updateTextPreset", id: selected.id, patch: styleFromObject(obj) });
+    toast(`Updated "${selected.name}"`);
   };
 
   const remove = () => {
@@ -322,17 +338,17 @@ function TextPresets({ obj }: { obj: EditorObject }) {
           value={name}
           onChange={(e) => setName(e.target.value)}
         />
-        <button id="preset-save" className="btn btn-sm" type="button" onClick={saveCurrent}>
-          Save current
+        <button id="preset-save" className="btn btn-sm" type="button" onClick={saveNew}>
+          Save new
         </button>
       </div>
       <button
-        id="preset-rename"
+        id="preset-update"
         className="btn btn-sm btn-ghost"
         type="button"
-        onClick={rename}
+        onClick={updateCurrent}
       >
-        Rename selected
+        Update current
       </button>
       <button
         id="preset-set-default"
@@ -570,7 +586,7 @@ function BrushProperties() {
 }
 
 function ArrangeProperties({ obj }: { obj: EditorObject }) {
-  const { deleteSelected, bringForward, sendBackward, updateObject, commit } = useEditor();
+  const { deleteSelected, updateObject, commit } = useEditor();
   const setRotation = (rotation: number) => {
     updateObject(obj.id, { rotation });
     commit(`${obj.id}:rotation`);
@@ -611,15 +627,7 @@ function ArrangeProperties({ obj }: { obj: EditorObject }) {
         </div>
       </section>
       <section className="prop-section" id="prop-order">
-        <h3 className="section-title">Arrange</h3>
-        <div className="row gap">
-          <button id="order-forward" className="btn btn-sm" type="button" onClick={bringForward}>
-            Bring forward
-          </button>
-          <button id="order-backward" className="btn btn-sm" type="button" onClick={sendBackward}>
-            Send backward
-          </button>
-        </div>
+        <h3 className="section-title">Delete</h3>
         <div className="row gap">
           <button id="btn-delete" className="btn btn-sm btn-danger" type="button" onClick={deleteSelected}>
             Delete selected
@@ -775,6 +783,13 @@ export function Properties() {
           <p className="muted">
             {state.started ? "Nothing selected." : "Start a project to begin editing."}
           </p>
+        </section>
+      )}
+
+      {state.activeTool !== "brush" && selected && selected.type !== "text" && (
+        <section className="prop-section" id="prop-order-top">
+          <h3 className="section-title">Arrange</h3>
+          <OrderButtons />
         </section>
       )}
 

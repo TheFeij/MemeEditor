@@ -7,6 +7,30 @@ export function StartOverlay() {
 
   return (
     <div className={`start-overlay${state.started ? " hidden" : ""}`} id="start-overlay">
+      <div className="start-bg" aria-hidden="true">
+        <span className="orb orb-1" />
+        <span className="orb orb-2" />
+        <span className="orb orb-3" />
+        <div className="grid-floor" />
+        {[
+          { e: "😂", x: "8%",  size: 34, dur: 19, delay: 0 },
+          { e: "🐸", x: "22%", size: 28, dur: 23, delay: 4 },
+          { e: "🔥", x: "38%", size: 30, dur: 17, delay: 8 },
+          { e: "💀", x: "55%", size: 36, dur: 21, delay: 2 },
+          { e: "🗿", x: "70%", size: 32, dur: 25, delay: 6 },
+          { e: "😎", x: "84%", size: 28, dur: 18, delay: 10 },
+          { e: "🤡", x: "93%", size: 34, dur: 22, delay: 13 },
+        ].map((f, i) => (
+            <span
+                key={i}
+                className="float-emoji"
+                style={{ "--x": f.x, "--size": `${f.size}px`, "--dur": `${f.dur}s`, "--delay": `${f.delay}s` } as React.CSSProperties}
+            >
+      {f.e}
+    </span>
+        ))}
+      </div>
+
       <div className="start-page">
         <header className="start-head">
           <span className="brand-mark">ME</span>

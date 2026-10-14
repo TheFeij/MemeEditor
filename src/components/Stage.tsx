@@ -172,7 +172,7 @@ export function Stage() {
     placeLogo,
     changeLogo,
   } = useEditor();
-  const stageRef = useRef<HTMLElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const interactionRef = useRef<Interaction | null>(null);
   const guideStateRef = useRef<GuideState | null>(null);
@@ -688,7 +688,6 @@ export function Stage() {
     <section
       className="stage"
       id="stage"
-      ref={stageRef}
       onDragOver={(e) => {
         e.preventDefault();
         setDragOver(true);
@@ -696,17 +695,19 @@ export function Stage() {
       onDragLeave={() => setDragOver(false)}
       onDrop={onDrop}
     >
-      <canvas
-        id="canvas"
-        ref={canvasRef}
-        width={800}
-        height={600}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-        onDoubleClick={onDoubleClick}
-      />
+      <div className="stage-viewport" ref={stageRef}>
+        <canvas
+          id="canvas"
+          ref={canvasRef}
+          width={800}
+          height={600}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          onDoubleClick={onDoubleClick}
+        />
+      </div>
 
       <div className={`empty-state${state.started ? " hidden" : ""}`} id="empty-state">
         <div className="empty-inner">

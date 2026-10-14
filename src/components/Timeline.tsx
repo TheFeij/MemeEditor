@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEditor } from "../state/EditorContext";
 import {
   chooseRulerStep,
@@ -7,6 +7,12 @@ import {
   formatTime,
   isObjectActiveAt,
 } from "../lib/video";
+import {
+  TIMELINE_SNAP_PX,
+  snapMove,
+  snapValue,
+  timelineSnapTargets,
+} from "../lib/timeline";
 import type { EditorObject } from "../types";
 
 type TimelineInteraction =
@@ -24,6 +30,10 @@ function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
 
+function round2(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+
 export function Timeline() {
   const { state, dispatch, commit, seekTo, getPlayhead, togglePlay, toggleMute } = useEditor();
 
@@ -33,6 +43,8 @@ export function Timeline() {
   const bodyRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
   const playheadRef = useRef<HTMLDivElement>(null);
+  const guideRef = useRef<HTMLDivElement>(null);
+  const [snapTime, setSnapTime] = useState<number | null>(null);
 
   const ticks = useMemo(() => {
     if (duration <= 0) return [] as { t: number; label: string }[];
@@ -56,6 +68,17 @@ export function Timeline() {
     const offset = l.left - b.left;
     const pct = duration > 0 ? clamp(getPlayhead() / duration, 0, 1) : 0;
     ph.style.transform = `translateX(${offset + pct * l.width}px)`;
+
+    const guide = guideRef.current;
+    if (guide) {
+      if (snapTime == null) {
+        guide.style.display = "none";
+      } else {
+        const gpct = duration > 0 ? clamp(snapTime / duration, 0, 1) : 0;
+        guide.style.display = "block";
+        guide.style.transform = `translateX(${offset + gpct * l.width}px)`;
+      }
+    }
   });
 
   const scrubFromClientX = (clientX: number) => {
@@ -121,19 +144,28 @@ export function Timeline() {
     if (!obj || it.width <= 0 || duration <= 0) return;
     const dT = ((e.clientX - it.startX) / it.width) * duration;
     const minLen = Math.min(0.05, duration);
+    const threshold = (TIMELINE_SNAP_PX / it.width) * duration;
+    const targets = timelineSnapTargets(duration, state.objects, it.id);
+
     let patch: Partial<EditorObject> | null = null;
     if (it.kind === "moveTime") {
       const len = it.origEnd - it.origStart;
-      const s = clamp(it.origStart + dT, 0, Math.max(0, duration - len));
-      patch = { tStart: Math.round(s * 100) / 100, tEnd: Math.round((s + len) * 100) / 100 };
+      const snapped = snapMove(it.origStart + dT, len, targets, threshold);
+      const s = clamp(snapped.value, 0, Math.max(0, duration - len));
+      patch = { tStart: round2(s), tEnd: round2(s + len) };
+      setSnapTime(snapped.guide);
       seekTo(s);
     } else if (it.kind === "trimL") {
-      const s = clamp(it.origStart + dT, 0, it.origEnd - minLen);
-      patch = { tStart: Math.round(s * 100) / 100 };
+      const snapped = snapValue(it.origStart + dT, targets, threshold);
+      const s = clamp(snapped.value, 0, it.origEnd - minLen);
+      patch = { tStart: round2(s) };
+      setSnapTime(snapped.guide);
       seekTo(s);
     } else {
-      const v = clamp(it.origEnd + dT, it.origStart + minLen, duration);
-      patch = { tEnd: Math.round(v * 100) / 100 };
+      const snapped = snapValue(it.origEnd + dT, targets, threshold);
+      const v = clamp(snapped.value, it.origStart + minLen, duration);
+      patch = { tEnd: round2(v) };
+      setSnapTime(snapped.guide);
       seekTo(v);
     }
     if (patch) dispatch({ type: "updateObject", id: it.id, patch });
@@ -143,6 +175,7 @@ export function Timeline() {
     const it = interactionRef.current;
     if (!it) return;
     interactionRef.current = null;
+    setSnapTime(null);
     const body = bodyRef.current;
     try {
       body?.releasePointerCapture(e.pointerId);
@@ -248,6 +281,7 @@ export function Timeline() {
         <div className="tl-playhead" id="tl-playhead" ref={playheadRef}>
           <div className="tl-playhead-handle" />
         </div>
+        <div className="tl-guide" id="tl-guide" ref={guideRef} />
       </div>
     </section>
   );

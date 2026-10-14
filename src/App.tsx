@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { TopBar } from "./components/TopBar";
 import { Toolbar } from "./components/Toolbar";
 import { Stage } from "./components/Stage";
@@ -39,6 +39,40 @@ export function App() {
     togglePlay,
   } = useEditor();
   const { confirm } = useConfirm();
+
+  const [panels, setPanels] = useState({ left: 240, right: 280, bottom: 172 });
+
+  // Drag a splitter to resize the toolbar, properties panel or timeline.
+  const beginResize = (kind: "left" | "right" | "bottom") => (e: React.PointerEvent) => {
+    e.preventDefault();
+    const el = e.currentTarget as HTMLElement;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const start = { ...panels };
+    el.classList.add("dragging");
+    document.body.style.userSelect = "none";
+    const onMove = (ev: PointerEvent) => {
+      if (kind === "left") {
+        const w = Math.max(160, Math.min(560, start.left + (ev.clientX - startX)));
+        setPanels((p) => ({ ...p, left: w }));
+      } else if (kind === "right") {
+        const w = Math.max(220, Math.min(640, start.right - (ev.clientX - startX)));
+        setPanels((p) => ({ ...p, right: w }));
+      } else {
+        const max = Math.round(window.innerHeight * 0.75);
+        const h = Math.max(110, Math.min(max, start.bottom - (ev.clientY - startY)));
+        setPanels((p) => ({ ...p, bottom: h }));
+      }
+    };
+    const onUp = () => {
+      el.classList.remove("dragging");
+      document.body.style.userSelect = "";
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
 
   const onRestart = useCallback(async () => {
     const ok = await confirm({
@@ -99,10 +133,37 @@ export function App() {
   return (
     <div id="app">
       <TopBar onRestart={() => void onRestart()} />
-      <main className="layout">
+      <main
+        className="layout"
+        style={
+          {
+            "--panel-left": `${panels.left}px`,
+            "--panel-right": `${panels.right}px`,
+            "--panel-bottom": `${panels.bottom}px`,
+          } as CSSProperties
+        }
+      >
         <Toolbar />
+        <div
+          className="splitter splitter-v splitter-left"
+          role="separator"
+          aria-orientation="vertical"
+          onPointerDown={beginResize("left")}
+        />
         <Stage />
+        <div
+          className="splitter splitter-v splitter-right"
+          role="separator"
+          aria-orientation="vertical"
+          onPointerDown={beginResize("right")}
+        />
         <Properties />
+        <div
+          className="splitter splitter-h splitter-bottom"
+          role="separator"
+          aria-orientation="horizontal"
+          onPointerDown={beginResize("bottom")}
+        />
         <Timeline />
       </main>
       <StartOverlay />

@@ -9,32 +9,38 @@ export function TopBar({ onRestart }: { onRestart: () => void }) {
 
   return (
     <header className="topbar">
-      <div className="brand">
-        <span className="brand-mark">ME</span>
-        <span className="brand-name">Meme Editor</span>
+      <div className="topbar-left">
+        <div className="brand">
+          <span className="brand-mark">ME</span>
+          <span className="brand-name">Meme Editor</span>
+        </div>
+        <div className="topbar-history">
+          <button
+            id="btn-undo"
+            className="btn btn-icon"
+            type="button"
+            title="Undo (Ctrl+Z)"
+            disabled={!canUndo}
+            onClick={undo}
+          >
+            ↶
+          </button>
+          <button
+            id="btn-redo"
+            className="btn btn-icon"
+            type="button"
+            title="Redo (Ctrl+Shift+Z)"
+            disabled={!canRedo}
+            onClick={redo}
+          >
+            ↷
+          </button>
+        </div>
       </div>
-      <div className="topbar-actions">
-        <button
-          id="btn-undo"
-          className="btn btn-icon"
-          type="button"
-          title="Undo (Ctrl+Z)"
-          disabled={!canUndo}
-          onClick={undo}
-        >
-          ↶
-        </button>
-        <button
-          id="btn-redo"
-          className="btn btn-icon"
-          type="button"
-          title="Redo (Ctrl+Shift+Z)"
-          disabled={!canRedo}
-          onClick={redo}
-        >
-          ↷
-        </button>
+
+      <div className="topbar-center">
         <button id="btn-open" className="btn" type="button" onClick={() => void openImageDialog()}>
+          <span className="topbar-center-icon">🖼️</span>
           Open Image
         </button>
         <button
@@ -43,6 +49,7 @@ export function TopBar({ onRestart }: { onRestart: () => void }) {
           type="button"
           onClick={() => void openVideoDialog()}
         >
+          <span className="topbar-center-icon">🎬</span>
           Open Video
         </button>
         <button
@@ -52,11 +59,15 @@ export function TopBar({ onRestart }: { onRestart: () => void }) {
           disabled={!state.started}
           onClick={() => void (isVideo ? openVideoDialog() : replaceImageDialog())}
         >
+          <span className="topbar-center-icon">🔁</span>
           {isVideo ? "Replace Video" : "Replace Image"}
         </button>
+      </div>
+
+      <div className="topbar-actions">
         <button
           id="btn-save"
-          className="btn btn-primary"
+          className="btn btn-success"
           type="button"
           onClick={() => void exportMedia()}
         >
