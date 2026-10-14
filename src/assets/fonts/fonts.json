@@ -1,0 +1,20 @@
+[
+    { "file": "Zain-Bold.ttf", "family": "Zain Bold" },
+    { "file": "Zain/Zain-Regular.ttf", "family": "Zain Regular" },
+    { "file": "Zain/Zain-Black.ttf", "family": "Zain Black" },
+    { "file": "Zain/Zain-ExtraBold.ttf", "family": "Zain ExtraBold" },
+    { "file": "Zain/Zain-ExtraLight.ttf", "family": "Zain ExtraLight" },
+    { "file": "Zain/Zain-Light.ttf", "family": "Zain Light" },
+    { "file": "Zain/Zain-Italic.ttf", "family": "Zain Italic" },
+    { "file": "Zain/Zain-LightItalic.ttf", "family": "Zain Light Italic" },
+    { "file": "Vazirmatn/static/Vazirmatn-Regular.ttf", "family": "Vazirmatn Regular" },
+    { "file": "Vazirmatn/static/Vazirmatn-Black.ttf", "family": "Vazirmatn Black" },
+    { "file": "Vazirmatn/static/Vazirmatn-Bold.ttf", "family": "Vazirmatn Bold" },
+    { "file": "Vazirmatn/static/Vazirmatn-ExtraBold.ttf", "family": "Vazirmatn ExtraBold" },
+    { "file": "Vazirmatn/static/Vazirmatn-ExtraLight.ttf", "family": "Vazirmatn ExtraLight" },
+    { "file": "Vazirmatn/static/Vazirmatn-Light.ttf", "family": "Vazirmatn Light" },
+    { "file": "Vazirmatn/static/Vazirmatn-Medium.ttf", "family": "Vazirmatn Medium" },
+    { "file": "Vazirmatn/static/Vazirmatn-SemiBold.ttf", "family": "Vazirmatn SemiBold" },
+    { "file": "Vazirmatn/static/Vazirmatn-Thin.ttf", "family": "Vazirmatn Thin" },
+    { "file": "Vazirmatn/Vazirmatn-VariableFont_wght.ttf", "family": "Vazirmatn Variable" }
+]

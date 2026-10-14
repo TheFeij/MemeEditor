@@ -1,0 +1,70 @@
+{
+  "name": "meme-editor",
+  "version": "2.0.0",
+  "private": true,
+  "description": "A fast, modern, offline meme editor (Electron + TypeScript + React)",
+  "author": {
+    "name": "TheFeij"
+  },
+  "main": "dist/electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n renderer,electron -c cyan,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "vite",
+    "dev:electron": "tsc -p tsconfig.electron.json && wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run build:renderer && npm run build:electron",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
+    "package": "npm run build && npm run fetch:ffmpeg && electron-builder"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.thefeij.memeeditor",
+    "productName": "Meme Editor",
+    "artifactName": "MemeEditor-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "icon": "logo.png",
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "."
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "zip"
+      ],
+      "category": "Graphics"
+    },
+    "win": {
+      "target": [
+        "zip"
+      ]
+    }
+  }
+}
