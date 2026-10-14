@@ -1,11 +1,8 @@
-# Build output
-build/bin/
+node_modules/
+dist/
+release/
+*.log
 
-# Wails generated JS bindings
-frontend/wailsjs/
-
-# Runtime preferences file (created next to the app)
-MemeEditor.config.json
-
-# OS / editor junk
-.DS_Store
+# Bundled ffmpeg (fetched per-platform at package time)
+resources/ffmpeg
+resources/ffmpeg.exe
