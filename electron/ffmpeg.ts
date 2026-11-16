@@ -24,6 +24,14 @@ export interface VideoExportLayer {
 export type VideoCodec = "h264" | "h265" | "vp9" | "av1";
 export type VideoHardware = "software" | "nvidia" | "intel" | "amd" | "apple";
 
+export interface VideoExportMusic {
+  sourcePath?: string;
+  sourceData?: string;
+  start: number;
+  end: number;
+  audioStart: number;
+}
+
 export interface VideoExportOptions {
   sourcePath?: string; // preferred: original file
   sourceData?: string; // fallback: data URL
@@ -46,6 +54,11 @@ export interface VideoExportOptions {
   // document resolution.
   outWidth?: number;
   outHeight?: number;
+  // Mix the original video's audio track into the output. Defaults to true.
+  originalAudio?: boolean;
+  // Custom music mixed over the video. `end` may be past the source video's
+  // length; the video is frozen on its last frame to cover the extra time.
+  music?: VideoExportMusic | null;
 }
 
 // Container implied by the codec: VP9 and AV1 go in WebM, everything else MP4.
@@ -135,6 +148,14 @@ function extFromHeader(header: string): string {
   if (header.includes("video/quicktime")) return ".mov";
   if (header.includes("video/x-matroska")) return ".mkv";
   if (header.includes("video/x-msvideo")) return ".avi";
+  if (header.includes("audio/mpeg") || header.includes("audio/mp3")) return ".mp3";
+  if (header.includes("audio/wav") || header.includes("audio/x-wav")) return ".wav";
+  if (header.includes("audio/ogg")) return ".ogg";
+  if (header.includes("audio/mp4") || header.includes("audio/m4a") || header.includes("audio/x-m4a"))
+    return ".m4a";
+  if (header.includes("audio/aac")) return ".aac";
+  if (header.includes("audio/flac")) return ".flac";
+  if (header.includes("audio/webm")) return ".weba";
   return ".bin";
 }
 
@@ -150,6 +171,7 @@ export function buildFilter(
   crop?: VideoExportOptions["crop"],
   outWidth?: number,
   outHeight?: number,
+  duration?: number,
 ): string {
   if (padX < 0) padX = 0;
   if (padY < 0) padY = 0;
@@ -192,6 +214,12 @@ export function buildFilter(
     prev = label;
   });
   let tail = `[${prev}]crop=trunc(iw/2)*2:trunc(ih/2)*2`;
+  // When music runs past the end of the video, the composed frame is cloned
+  // (last frame held) so the exported video is as long as the timeline instead
+  // of stopping at the source clip's EOF. `-t duration` trims any excess.
+  if (duration && duration > 0) {
+    tail += `,tpad=stop_mode=clone:stop_duration=${duration.toFixed(3)}`;
+  }
   if (outWidth && outHeight && (outWidth !== width || outHeight !== height)) {
     tail += `,scale=${outWidth}:${outHeight}`;
   }
@@ -276,6 +304,59 @@ async function resolveAudioArgs(ffmpeg: string, container: "mp4" | "webm"): Prom
   return ["-c:a", "aac", "-b:a", "192k"];
 }
 
+// Probe the source for an audio stream so `[0:a]` never refers to a stream that
+// does not exist (silent videos are common). ffmpeg prints stream info to
+// stderr even when it exits with an error because no output was requested.
+function hasAudioStream(ffmpeg: string, filePath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let out = "";
+    const child = spawn(ffmpeg, ["-hide_banner", "-i", filePath]);
+    child.stderr.on("data", (d) => (out += d.toString()));
+    child.on("error", () => resolve(false));
+    child.on("close", () => resolve(/\bAudio:\s/.test(out)));
+  });
+}
+
+// Build the audio graph: optionally the original track, optionally the music
+// clip (trimmed to its timeline window and delayed to its start), mixed when
+// both are present. Returns the filter fragments and the output label.
+function buildAudioFilter(
+  originalAudio: boolean,
+  music: VideoExportOptions["music"] | null | undefined,
+  musicInputIndex: number | null,
+): { parts: string[]; label: string | null } {
+  const parts: string[] = [];
+  const hasMusic = !!music && musicInputIndex != null;
+  if (!originalAudio && !hasMusic) return { parts, label: null };
+
+  let original: string | null = null;
+  if (originalAudio) {
+    parts.push(`[0:a:0]anull[orig]`);
+    original = "orig";
+  }
+
+  let musicLabel: string | null = null;
+  if (hasMusic && music && musicInputIndex != null) {
+    const start = Math.max(0, music.start || 0);
+    const end = Math.max(start + 0.01, music.end || 0);
+    const length = Math.max(0.01, end - start);
+    const audioStart = Math.max(0, music.audioStart || 0);
+    const delayMs = Math.round(start * 1000);
+    parts.push(
+      `[${musicInputIndex}:a]atrim=start=${audioStart.toFixed(3)}:end=${(audioStart + length).toFixed(3)},asetpts=PTS-STARTPTS,adelay=${delayMs}:all=1[mus]`,
+    );
+    musicLabel = "mus";
+  }
+
+  if (original && musicLabel) {
+    parts.push(
+      `[${original}][${musicLabel}]amix=inputs=2:duration=longest:dropout_transition=0[aout]`,
+    );
+    return { parts, label: "aout" };
+  }
+  return { parts, label: original ?? musicLabel };
+}
+
 function run(ffmpeg: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpeg, args);
@@ -333,12 +414,36 @@ export async function exportVideo(opts: VideoExportOptions, outPath: string): Pr
       layerPaths.push(p);
     }
 
+    // Resolve the optional music source the same way as the video: prefer the
+    // original file, fall back to an in-memory data URL.
+    let musicPath = "";
+    if (opts.music) {
+      let candidate = opts.music.sourcePath && opts.music.sourcePath.trim() ? opts.music.sourcePath : "";
+      if (candidate) {
+        try {
+          const stat = await fs.stat(candidate);
+          if (!stat.isFile()) candidate = "";
+        } catch {
+          candidate = "";
+        }
+      }
+      if (!candidate && opts.music.sourceData && opts.music.sourceData.startsWith("data:")) {
+        const header = opts.music.sourceData.slice(0, opts.music.sourceData.indexOf(","));
+        let ext = extFromHeader(header);
+        if (ext === ".bin") ext = ".mp3";
+        candidate = path.join(tmpDir, "music" + ext);
+        await fs.writeFile(candidate, decodeDataURL(opts.music.sourceData));
+      }
+      musicPath = candidate;
+    }
+
     const codec = opts.codec ?? "h264";
     const hardware = opts.hardware ?? "software";
     const container = containerForCodec(codec);
     const encoder = await resolveEncoder(ffmpeg, codec, hardware);
 
     const color = normalizeFFColor(opts.background) ?? "black";
+    const duration = opts.duration > 0 ? opts.duration : 0;
     const filter = buildFilter(
       opts.width,
       opts.height,
@@ -349,18 +454,30 @@ export async function exportVideo(opts: VideoExportOptions, outPath: string): Pr
       opts.crop,
       opts.outWidth,
       opts.outHeight,
+      duration,
     );
+
+    const originalAudio =
+      opts.originalAudio !== false && (await hasAudioStream(ffmpeg, srcPath));
+    const musicIndex = musicPath ? layerPaths.length + 1 : null;
+    const audio = buildAudioFilter(originalAudio, opts.music, musicIndex);
+    const filterComplex = audio.parts.length
+      ? filter + ";" + audio.parts.join(";")
+      : filter;
     const audioArgs = await resolveAudioArgs(ffmpeg, container);
 
     const args: string[] = ["-y", "-hide_banner", "-loglevel", "error", "-i", srcPath];
     for (const p of layerPaths) {
       args.push("-loop", "1", "-framerate", String(fps), "-i", p);
     }
-    args.push("-filter_complex", filter, "-map", "[vout]", "-map", "0:a:0?");
+    if (musicPath) args.push("-i", musicPath);
+    args.push("-filter_complex", filterComplex, "-map", "[vout]");
+    if (audio.label) args.push("-map", `[${audio.label}]`);
     args.push("-c:v", encoder, ...encoderArgs(encoder));
     if (isHevc(encoder) && container === "mp4") args.push("-tag:v", "hvc1");
-    args.push("-pix_fmt", "yuv420p", ...audioArgs);
-    if (opts.duration > 0) args.push("-t", opts.duration.toFixed(3));
+    args.push("-pix_fmt", "yuv420p");
+    if (audio.label) args.push(...audioArgs);
+    if (duration > 0) args.push("-t", duration.toFixed(3));
     if (container === "mp4") args.push("-movflags", "+faststart");
     args.push(outPath);
 

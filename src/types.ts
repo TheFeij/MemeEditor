@@ -125,6 +125,20 @@ export interface BaseImage {
   height: number;
 }
 
+// A music clip on the video timeline. `start`/`end` are timeline positions while
+// `audioStart` is the offset into the source audio that plays at `start`. The
+// clip can be shorter than the source (right-trim) or start later in the source
+// (left-trim), which is what lets a long song be cut to fit.
+export interface MusicTrack {
+  name: string;
+  path: string | null;
+  dataUrl: string;
+  duration: number;
+  start: number;
+  end: number;
+  audioStart: number;
+}
+
 export interface DocSnapshot {
   mediaType: MediaType;
   baseImage: BaseImage;
@@ -137,6 +151,7 @@ export interface DocSnapshot {
   currentColor: string;
   currentShapeFill: string;
   videoCrop: Rect | null;
+  music: MusicTrack | null;
   // History-coalescing metadata: consecutive commits that share a `key` within
   // the coalescing window are merged into a single undo step.
   key?: string;
@@ -181,6 +196,10 @@ export interface EditorState {
   // pixels) that is shown. The video file is never re-encoded; it is only
   // cropped when the user saves.
   videoCrop: Rect | null;
+  // Optional music track. When its end is past the video duration the whole
+  // timeline (and the exported file) grows to fit it; the video freezes on its
+  // last frame while the music keeps playing.
+  music: MusicTrack | null;
   history: DocSnapshot[];
   historyIndex: number;
 }
@@ -196,6 +215,15 @@ export interface VideoExportLayer {
   start: number;
   end: number;
   blur: number;
+}
+
+export interface VideoExportMusic {
+  sourcePath?: string;
+  sourceData?: string;
+  // Timeline placement and the offset into the source audio.
+  start: number;
+  end: number;
+  audioStart: number;
 }
 
 export interface VideoExportOptions {
@@ -220,10 +248,15 @@ export interface VideoExportOptions {
   // document resolution.
   outWidth?: number;
   outHeight?: number;
+  // Include the original video's audio. Defaults to true.
+  originalAudio?: boolean;
+  // Custom music mixed over the video. Its end may extend the export past the
+  // source video's length.
+  music?: VideoExportMusic | null;
 }
 
 export interface MemeApi {
-  pickMedia(kind: "image" | "video"): Promise<string | null>;
+  pickMedia(kind: "image" | "video" | "audio"): Promise<string | null>;
   readMedia(filePath: string): Promise<string>;
   getPathForFile(file: File): string;
   saveImage(dataURL: string): Promise<string | null>;

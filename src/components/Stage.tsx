@@ -22,7 +22,7 @@ import {
 } from "../lib/object";
 import { CURSORS, DEFAULT_RECT_RADIUS } from "../lib/constants";
 import { bumpContentRev, contentSignature, pruneBlurCache, setBlurRedraw } from "../lib/blur";
-import { defaultTimingPatch, isObjectActiveAt, isVideoFile } from "../lib/video";
+import { defaultTimingPatch, isObjectActiveAt, isVideoFile, timelineDuration } from "../lib/video";
 import type { EditorObject, EditorState } from "../types";
 
 const HANDLE_CURSORS: Record<string, string> = {
@@ -194,7 +194,11 @@ export function Stage() {
 
   const timingPatch = useCallback(
     (st: typeof state): Partial<EditorObject> =>
-      defaultTimingPatch(st.mediaType, getPlayhead(), st.video.duration) ?? {},
+      defaultTimingPatch(
+        st.mediaType,
+        getPlayhead(),
+        timelineDuration(st.video.duration, st.music),
+      ) ?? {},
     [getPlayhead],
   );
 

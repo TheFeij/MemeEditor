@@ -8,6 +8,7 @@ import { RichTextField } from "./RichTextField";
 import { Select } from "./Select";
 import { getSelectedObject } from "../lib/render";
 import { textPresetPatch, uid, round2 } from "../lib/object";
+import { timelineDuration } from "../lib/video";
 import { DEFAULT_FONT, DEFAULT_LINE_SPACING, DEFAULT_TEXT_DIRECTION } from "../lib/constants";
 import type { Align, Direction, EditorObject, TextPreset } from "../types";
 
@@ -625,7 +626,7 @@ function ArrangeProperties({ obj }: { obj: EditorObject }) {
 
 function TimingProperties({ obj }: { obj: EditorObject }) {
   const { state, updateObject, commit, getPlayhead } = useEditor();
-  const duration = state.video.duration || 0;
+  const duration = timelineDuration(state.video.duration, state.music);
   const start = obj.tStart ?? 0;
   const end = obj.tEnd ?? duration;
   const set = (patch: Partial<EditorObject>) => {

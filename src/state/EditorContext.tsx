@@ -26,9 +26,16 @@ import {
   isVideoFile,
   renderBlurMaskPng,
   renderObjectPng,
+  timelineDuration,
 } from "../lib/video";
 import { PREFERENCES_VERSION } from "../lib/constants";
-import type { EditorObject, EditorState, Tool, VideoExportLayer } from "../types";
+import type {
+  EditorObject,
+  EditorState,
+  MusicTrack,
+  Tool,
+  VideoExportLayer,
+} from "../types";
 
 interface Preferences {
   version: number;
@@ -80,6 +87,8 @@ interface EditorContextValue {
   getPlayhead: () => number;
   subscribeVideo: (fn: () => void) => () => void;
   videoTick: number;
+  addMusicDialog: () => Promise<void>;
+  removeMusic: () => void;
   exporting: boolean;
   exportProgress: number | null;
   exportDialogOpen: boolean;
@@ -168,6 +177,9 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const persistTimer = useRef<number | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
+  // Playback state mirrored synchronously so callbacks invoked in the same tick
+  // as a play/pause dispatch see the new value.
+  const playingRef = useRef(false);
 
   // Video playback state (the element itself is rendered by the Stage and
   // attached through this ref).
@@ -181,6 +193,13 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const videoPathRef = useRef<string | null>(null);
   const videoBlobRef = useRef<Blob | null>(null);
   const frameHandleRef = useRef<number | null>(null);
+  // While the music outlives the video, playback is driven by a wall clock and
+  // the video stays frozen on its last frame. The playhead is not tied to
+  // `video.currentTime` in that region.
+  const postRollRef = useRef<{ baseTime: number; wall: number } | null>(null);
+  const postRollHandleRef = useRef<number | null>(null);
+  const musicElRef = useRef<HTMLAudioElement | null>(null);
+  const musicSrcRef = useRef<string | null>(null);
   const usingRvfcRef = useRef(false);
   const exportingRef = useRef(false);
   const videoListenersRef = useRef(new Set<() => void>());
@@ -354,8 +373,12 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       const st = stateRef.current;
       const object = imageLayerObject(st, img, relativeWidth);
       if (st.mediaType === "video" && videoElRef.current) {
-        object.tStart = Math.round((videoElRef.current.currentTime || 0) * 100) / 100;
-        object.tEnd = st.video.duration || 0;
+        const pr = postRollRef.current;
+        const playhead = pr
+          ? pr.baseTime
+          : videoElRef.current.currentTime || 0;
+        object.tStart = Math.round(playhead * 100) / 100;
+        object.tEnd = timelineDuration(st.video.duration, st.music);
       }
       dispatch({ type: "addObject", object });
       dispatch({ type: "setActiveTool", tool: "select" });
@@ -456,9 +479,16 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     setVideoTick((v) => v + 1);
   }, []);
 
+  const stopPostRoll = useCallback(() => {
+    const handle = postRollHandleRef.current;
+    postRollHandleRef.current = null;
+    if (handle != null) cancelAnimationFrame(handle);
+  }, []);
+
   const stopLoop = useCallback(() => {
     const handle = frameHandleRef.current;
     frameHandleRef.current = null;
+    stopPostRoll();
     if (handle == null) return;
     const el = videoElRef.current;
     if (usingRvfcRef.current && el && el.cancelVideoFrameCallback) {
@@ -470,7 +500,95 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     } else {
       cancelAnimationFrame(handle);
     }
+  }, [stopPostRoll]);
+
+  // The playhead can sit past the source video's end when music extends the
+  // timeline, so it is not always `video.currentTime`.
+  const getPlayhead = useCallback(() => {
+    if (stateRef.current.mediaType !== "video") return 0;
+    const pr = postRollRef.current;
+    if (pr) {
+      const elapsed = playingRef.current ? (performance.now() - pr.wall) / 1000 : 0;
+      return Math.max(0, pr.baseTime + elapsed);
+    }
+    const el = videoElRef.current;
+    return el?.currentTime || 0;
   }, []);
+
+  // Keep the preview <audio> element in step with the playhead. It only plays
+  // while the playhead is inside the music clip's window.
+  const syncMusic = useCallback(
+    (force = false) => {
+      const audio = musicElRef.current;
+      if (!audio) return;
+      const m = stateRef.current.music;
+      if (!m) {
+        if (!audio.paused) audio.pause();
+        return;
+      }
+      const t = getPlayhead();
+      const inside = t >= m.start - 1e-3 && t < m.end - 1e-3;
+      if (!inside) {
+        if (!audio.paused) audio.pause();
+        return;
+      }
+      const desired = Math.max(
+        0,
+        Math.min(
+          isFinite(m.duration) && m.duration > 0 ? m.duration : Number.MAX_SAFE_INTEGER,
+          m.audioStart + (t - m.start),
+        ),
+      );
+      if (force || Math.abs(audio.currentTime - desired) > 0.3) {
+        try {
+          audio.currentTime = desired;
+        } catch {
+          /* ignore */
+        }
+      }
+      if (playingRef.current) {
+        if (audio.paused) {
+          void audio.play().catch(() => {
+            /* autoplay may be blocked; ignore */
+          });
+        }
+      } else if (!audio.paused) {
+        audio.pause();
+      }
+    },
+    [getPlayhead],
+  );
+
+  // Drive playback during the music-only tail after the video has ended.
+  const startPostRoll = useCallback(
+    (fromTime: number) => {
+      postRollRef.current = { baseTime: fromTime, wall: performance.now() };
+      if (postRollHandleRef.current != null) return;
+      const step = () => {
+        postRollHandleRef.current = null;
+        const pr = postRollRef.current;
+        const st = stateRef.current;
+        const total = timelineDuration(st.video.duration, st.music);
+        if (!pr || !playingRef.current || total <= 0) return;
+        const t = pr.baseTime + (performance.now() - pr.wall) / 1000;
+        if (t >= total - 1e-3) {
+          postRollRef.current = { baseTime: total, wall: performance.now() };
+          playingRef.current = false;
+          dispatch({ type: "setVideoState", patch: { playing: false } });
+          syncMusic(true);
+          emitVideo();
+          setVideoTick((v) => v + 1);
+          return;
+        }
+        syncMusic(false);
+        emitVideo();
+        bumpTick();
+        postRollHandleRef.current = requestAnimationFrame(step);
+      };
+      postRollHandleRef.current = requestAnimationFrame(step);
+    },
+    [bumpTick, dispatch, emitVideo, syncMusic],
+  );
 
   const startLoop = useCallback(() => {
     if (frameHandleRef.current != null) return;
@@ -482,6 +600,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         setVideoTick((v) => v + 1);
         return;
       }
+      syncMusic(false);
       emitVideo();
       bumpTick();
       if (el.requestVideoFrameCallback) {
@@ -500,32 +619,60 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       usingRvfcRef.current = false;
       frameHandleRef.current = requestAnimationFrame(step);
     }
-  }, [bumpTick, emitVideo]);
+  }, [bumpTick, emitVideo, syncMusic]);
 
   const play = useCallback(() => {
     const el = videoElRef.current;
     if (!el) return;
-    const dur = el.duration;
-    if (isFinite(dur) && dur > 0 && el.currentTime >= dur - 0.05) {
+    const st = stateRef.current;
+    const total = timelineDuration(st.video.duration, st.music);
+    const videoDur = isFinite(el.duration) && el.duration > 0 ? el.duration : st.video.duration;
+    let t = getPlayhead();
+    if (total > 0 && t >= total - 0.05) {
+      t = 0;
+      postRollRef.current = null;
       try {
         el.currentTime = 0;
       } catch {
         /* ignore */
       }
     }
+    playingRef.current = true;
     dispatch({ type: "setVideoState", patch: { playing: true } });
+    // Starting inside the tail: the video is already over, so freeze it and
+    // let the wall clock drive the playhead.
+    if (st.music && videoDur > 0 && t >= videoDur - 1e-3) {
+      try {
+        el.pause();
+      } catch {
+        /* ignore */
+      }
+      syncMusic(true);
+      startPostRoll(t);
+      emitVideo();
+      return;
+    }
+    postRollRef.current = null;
     const p = el.play();
     if (p && typeof p.catch === "function") {
       p.catch(() => {
+        playingRef.current = false;
         dispatch({ type: "setVideoState", patch: { playing: false } });
         stopLoop();
       });
     }
+    syncMusic(true);
     startLoop();
-  }, [dispatch, startLoop, stopLoop]);
+  }, [dispatch, emitVideo, getPlayhead, startLoop, startPostRoll, stopLoop, syncMusic]);
 
   const pause = useCallback(() => {
     const el = videoElRef.current;
+    const pr = postRollRef.current;
+    if (pr) {
+      // Freeze the virtual clock at the current playhead.
+      postRollRef.current = { baseTime: getPlayhead(), wall: performance.now() };
+    }
+    playingRef.current = false;
     dispatch({ type: "setVideoState", patch: { playing: false } });
     if (el) {
       try {
@@ -535,14 +682,15 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       }
     }
     stopLoop();
+    syncMusic(true);
     emitVideo();
-  }, [dispatch, emitVideo, stopLoop]);
+  }, [dispatch, emitVideo, getPlayhead, stopLoop, syncMusic]);
 
   const togglePlay = useCallback(() => {
     const el = videoElRef.current;
     if (stateRef.current.mediaType !== "video" || !el) return;
-    if (el.paused || el.ended) play();
-    else pause();
+    if (playingRef.current) pause();
+    else play();
   }, [pause, play]);
 
   const toggleMute = useCallback(() => {
@@ -557,24 +705,44 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     (t: number) => {
       const el = videoElRef.current;
       if (!el) return;
-      const dur = isFinite(el.duration) ? el.duration : 0;
-      const clamped = Math.max(0, Math.min(dur, t));
-      try {
-        el.currentTime = clamped;
-      } catch {
-        /* ignore */
+      const st = stateRef.current;
+      const total = timelineDuration(st.video.duration, st.music);
+      const fallback = isFinite(el.duration) ? el.duration : 0;
+      const clamped = Math.max(0, Math.min(total > 0 ? total : fallback, t));
+      const videoDur = isFinite(el.duration) && el.duration > 0 ? el.duration : st.video.duration;
+      stopPostRoll();
+      if (st.music && videoDur > 0 && clamped >= videoDur - 1e-3) {
+        try {
+          el.pause();
+        } catch {
+          /* ignore */
+        }
+        try {
+          el.currentTime = Math.max(0, videoDur - 0.001);
+        } catch {
+          /* ignore */
+        }
+        postRollRef.current = { baseTime: clamped, wall: performance.now() };
+        if (playingRef.current) startPostRoll(clamped);
+      } else {
+        postRollRef.current = null;
+        try {
+          el.currentTime = clamped;
+        } catch {
+          /* ignore */
+        }
+        if (playingRef.current) {
+          const p = el.play();
+          if (p && typeof p.catch === "function") p.catch(() => undefined);
+          startLoop();
+        }
       }
+      syncMusic(true);
       emitVideo();
       setVideoTick((v) => v + 1);
     },
-    [emitVideo],
+    [emitVideo, startLoop, startPostRoll, stopPostRoll, syncMusic],
   );
-
-  const getPlayhead = useCallback(() => {
-    const el = videoElRef.current;
-    if (!el || stateRef.current.mediaType !== "video") return 0;
-    return el.currentTime || 0;
-  }, []);
 
   const loadVideoSrc = useCallback(
     async (src: string, blob: Blob | null, path: string | null) => {
@@ -584,6 +752,13 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         return;
       }
       stopLoop();
+      postRollRef.current = null;
+      playingRef.current = false;
+      try {
+        musicElRef.current?.pause();
+      } catch {
+        /* ignore */
+      }
       videoPathRef.current = path;
       videoBlobRef.current = blob;
       el.muted = stateRef.current.video.muted;
@@ -684,6 +859,82 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     [loadVideoSrc, toast],
   );
 
+  const loadMusicFromPath = useCallback(
+    async (path: string) => {
+      try {
+        const dataUrl = await window.meme.readMedia(path);
+        const probe = document.createElement("audio");
+        probe.preload = "metadata";
+        const duration = await new Promise<number>((resolve, reject) => {
+          const timer = window.setTimeout(() => reject(new Error("timeout")), 10000);
+          const done = (value: number) => {
+            window.clearTimeout(timer);
+            resolve(value);
+          };
+          probe.addEventListener(
+            "loadedmetadata",
+            () => done(isFinite(probe.duration) ? probe.duration : 0),
+            { once: true },
+          );
+          probe.addEventListener(
+            "error",
+            () => {
+              window.clearTimeout(timer);
+              reject(new Error("could not decode audio"));
+            },
+            { once: true },
+          );
+          probe.src = dataUrl;
+          probe.load();
+        });
+        if (!duration || !isFinite(duration) || duration <= 0) {
+          toast("This audio file has no usable duration", "error");
+          return;
+        }
+        const name = path.split(/[\\/]/).pop() || "Music";
+        const music: MusicTrack = {
+          name,
+          path,
+          dataUrl,
+          duration,
+          // Start at the beginning; the timeline grows if the song is longer
+          // than the video, and the user can trim it from the timeline.
+          start: 0,
+          end: duration,
+          audioStart: 0,
+        };
+        dispatch({ type: "setMusic", music });
+        dispatch({ type: "commit" });
+        toast(`Music added · ${formatTime(duration)}`);
+      } catch (err) {
+        toast(
+          "Could not read audio file: " + (err instanceof Error ? err.message : String(err)),
+          "error",
+        );
+      }
+    },
+    [dispatch, toast],
+  );
+
+  const addMusicDialog = useCallback(async () => {
+    if (stateRef.current.mediaType !== "video") {
+      toast("Music can only be added to a video project", "error");
+      return;
+    }
+    const path = await window.meme.pickMedia("audio");
+    if (path) await loadMusicFromPath(path);
+  }, [loadMusicFromPath, toast]);
+
+  const removeMusic = useCallback(() => {
+    try {
+      musicElRef.current?.pause();
+    } catch {
+      /* ignore */
+    }
+    dispatch({ type: "setMusic", music: null });
+    dispatch({ type: "commit" });
+  }, [dispatch]);
+
   const exportVideo = useCallback(async () => {
     const current = stateRef.current;
     const el = videoElRef.current;
@@ -709,7 +960,8 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     }
 
     const size = computeDocumentSize(current.baseImage, current.padding);
-    const duration = current.video.duration || (isFinite(el.duration) ? el.duration : 0);
+    const videoDuration = current.video.duration || (isFinite(el.duration) ? el.duration : 0);
+    const duration = timelineDuration(videoDuration, current.music);
     if (!isFinite(duration) || duration <= 0) {
       toast("This video has no usable duration", "error");
       return;
@@ -773,6 +1025,16 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         hardware: current.video.hardware,
         outWidth: out.width,
         outHeight: out.height,
+        originalAudio: !current.video.muted,
+        music: current.music
+          ? {
+              sourcePath: current.music.path || undefined,
+              sourceData: current.music.path ? undefined : current.music.dataUrl,
+              start: current.music.start,
+              end: current.music.end,
+              audioStart: current.music.audioStart,
+            }
+          : null,
       });
       if (saved) toast("Saved " + saved);
       else toast("Export cancelled");
@@ -1002,7 +1264,11 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       opacity: 1,
       rotation: 0,
     };
-    const timing = defaultTimingPatch(st.mediaType, getPlayhead(), st.video.duration);
+    const timing = defaultTimingPatch(
+      st.mediaType,
+      getPlayhead(),
+      timelineDuration(st.video.duration, st.music),
+    );
     if (timing) Object.assign(obj, timing);
     dispatch({ type: "addObject", object: obj });
     dispatch({ type: "setActiveTool", tool: "select" });
@@ -1064,8 +1330,24 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     videoElRef.current = el;
 
     const onEnded = () => {
+      const st = stateRef.current;
+      const videoDur = isFinite(el.duration) && el.duration > 0 ? el.duration : st.video.duration;
+      const total = timelineDuration(st.video.duration, st.music);
+      // If music extends the timeline, keep playing over a frozen last frame
+      // instead of stopping at the source video's EOF.
+      if (playingRef.current && st.music && total > videoDur + 0.02) {
+        postRollRef.current = { baseTime: videoDur, wall: performance.now() };
+        syncMusic(false);
+        emitVideo();
+        setVideoTick((v) => v + 1);
+        startPostRoll(videoDur);
+        return;
+      }
+      playingRef.current = false;
+      postRollRef.current = null;
       dispatch({ type: "setVideoState", patch: { playing: false } });
       stopLoop();
+      syncMusic(true);
       emitVideo();
       setVideoTick((v) => v + 1);
     };
@@ -1093,7 +1375,50 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       el.remove();
       videoElRef.current = null;
     };
-  }, [dispatch, emitVideo, stopLoop]);
+  }, [dispatch, emitVideo, startPostRoll, stopLoop, syncMusic]);
+
+  // Preview <audio> element for the music track. Created once, its source is
+  // swapped whenever the music changes.
+  useEffect(() => {
+    const el = document.createElement("audio");
+    el.preload = "auto";
+    el.className = "music-source";
+    document.body.appendChild(el);
+    musicElRef.current = el;
+    return () => {
+      try {
+        el.pause();
+      } catch {
+        /* ignore */
+      }
+      el.removeAttribute("src");
+      try {
+        el.load();
+      } catch {
+        /* ignore */
+      }
+      el.remove();
+      musicElRef.current = null;
+      musicSrcRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const el = musicElRef.current;
+    if (!el) return;
+    const src = state.music ? state.music.dataUrl : null;
+    if (src !== musicSrcRef.current) {
+      musicSrcRef.current = src;
+      if (src) {
+        el.src = src;
+        el.load();
+      } else {
+        el.removeAttribute("src");
+        el.load();
+      }
+    }
+    syncMusic(true);
+  }, [state.music, syncMusic]);
 
   // Leaving a video project (loading an image, restarting) must stop playback.
   useEffect(() => {
@@ -1105,6 +1430,13 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       } catch {
         /* ignore */
       }
+    }
+    playingRef.current = false;
+    postRollRef.current = null;
+    try {
+      musicElRef.current?.pause();
+    } catch {
+      /* ignore */
     }
     stopLoop();
   }, [state.mediaType, stopLoop]);
@@ -1142,6 +1474,8 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       getPlayhead,
       subscribeVideo,
       videoTick,
+      addMusicDialog,
+      removeMusic,
       exporting,
       exportProgress,
       exportDialogOpen,
@@ -1192,6 +1526,8 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       getPlayhead,
       subscribeVideo,
       videoTick,
+      addMusicDialog,
+      removeMusic,
       exporting,
       exportProgress,
       exportDialogOpen,

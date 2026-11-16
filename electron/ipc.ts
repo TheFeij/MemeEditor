@@ -19,6 +19,7 @@ import { listUserFonts } from "./fonts";
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i;
 const VIDEO_EXT_RE = /\.(mp4|webm|mov|mkv|avi|m4v|ogv)$/i;
+const AUDIO_EXT = ["mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "opus", "weba"];
 
 const EXT_MIME: Record<string, string> = {
   ".png": "image/png",
@@ -37,6 +38,15 @@ const EXT_MIME: Record<string, string> = {
   ".mkv": "video/x-matroska",
   ".avi": "video/x-msvideo",
   ".ogv": "video/ogg",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".oga": "audio/ogg",
+  ".m4a": "audio/mp4",
+  ".aac": "audio/aac",
+  ".flac": "audio/flac",
+  ".opus": "audio/ogg",
+  ".weba": "audio/webm",
 };
 
 function sniffMime(buf: Buffer): string {
@@ -64,7 +74,9 @@ function resolveMime(filePath: string, buf: Buffer): string {
 }
 
 function isMedia(mime: string): boolean {
-  return mime.startsWith("image/") || mime.startsWith("video/");
+  return (
+    mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/")
+  );
 }
 
 function ownerWindow(event: Electron.IpcMainInvokeEvent): BrowserWindow | null {
@@ -85,15 +97,17 @@ export function registerIpc(): void {
     return `data:${mime};base64,${data.toString("base64")}`;
   });
 
-  ipcMain.handle("media:pick", async (event, kind: "image" | "video") => {
+  ipcMain.handle("media:pick", async (event, kind: "image" | "video" | "audio") => {
     const win = ownerWindow(event);
     const filters =
       kind === "video"
         ? [{ name: "Video", extensions: ["mp4", "webm", "mov", "mkv", "avi", "m4v", "ogv"] }]
-        : [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "ico"] }];
+        : kind === "audio"
+          ? [{ name: "Audio", extensions: AUDIO_EXT }]
+          : [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "ico"] }];
     const defaultDir = await lastSaveDir();
     const options: Electron.OpenDialogOptions = {
-      title: kind === "video" ? "Open Video" : "Open Image",
+      title: kind === "video" ? "Open Video" : kind === "audio" ? "Add Music" : "Open Image",
       properties: ["openFile"],
       filters,
       defaultPath: defaultDir || undefined,

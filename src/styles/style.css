@@ -1663,6 +1663,15 @@ input[type="range"]:disabled {
     background: #6b3f45;
 }
 
+.clip-music {
+    background: #8a3f78;
+    border-color: rgba(var(--tint-pink), 0.7);
+}
+
+.tl-lane-music .tl-clip {
+    background: #7a3f6e;
+}
+
 .tl-clip-body {
     flex: 1 1 auto;
     min-width: 0;

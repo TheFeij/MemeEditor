@@ -4,7 +4,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 // Everything the editor needs from the OS (file dialogs, file reads, ffmpeg,
 // the native blur, font discovery and preferences) goes through here.
 const api = {
-  pickMedia: (kind: "image" | "video"): Promise<string | null> =>
+  pickMedia: (kind: "image" | "video" | "audio"): Promise<string | null> =>
     ipcRenderer.invoke("media:pick", kind),
   readMedia: (filePath: string): Promise<string> => ipcRenderer.invoke("media:read", filePath),
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),

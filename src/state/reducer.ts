@@ -11,6 +11,7 @@ import type {
   DocSnapshot,
   EditorObject,
   EditorState,
+  MusicTrack,
   Padding,
   Rect,
   ShapeMode,
@@ -49,6 +50,8 @@ export type Action =
       duration: number;
     }
   | { type: "setVideoState"; patch: Partial<EditorState["video"]> }
+  | { type: "setMusic"; music: MusicTrack | null }
+  | { type: "updateMusic"; patch: Partial<MusicTrack> }
   | { type: "setShowHidden"; value: boolean }
   | { type: "setCropActive"; active: boolean }
   | { type: "setCropRect"; rect: Rect | null }
@@ -111,6 +114,7 @@ function snapshot(state: EditorState): DocSnapshot {
     currentColor: state.currentColor,
     currentShapeFill: state.currentShapeFill,
     videoCrop: state.videoCrop ? { ...state.videoCrop } : null,
+    music: state.music ? { ...state.music } : null,
   };
 }
 
@@ -149,6 +153,7 @@ function applySnapshot(state: EditorState, snap: DocSnapshot, index: number): Ed
     currentColor: snap.currentColor,
     currentShapeFill: snap.currentShapeFill,
     videoCrop: snap.videoCrop ? { ...snap.videoCrop } : null,
+    music: snap.music ? { ...snap.music } : null,
     historyIndex: index,
   };
 }
@@ -179,6 +184,7 @@ export function reducer(state: EditorState, action: Action): EditorState {
         selectedObjectId: null,
         video: { ...state.video, duration: 0, playing: false },
         videoCrop: null,
+        music: null,
       };
       return resetHistoryWith(next);
     }
@@ -193,6 +199,7 @@ export function reducer(state: EditorState, action: Action): EditorState {
         selectedObjectId: null,
         video: { ...state.video, duration: 0, playing: false },
         videoCrop: null,
+        music: null,
       };
       return resetHistoryWith(next);
     }
@@ -216,12 +223,21 @@ export function reducer(state: EditorState, action: Action): EditorState {
         selectedObjectId: null,
         showHiddenObjects: false,
         videoCrop: null,
+        music: null,
       };
       return resetHistoryWith(next);
     }
 
     case "setVideoState":
       return { ...state, video: { ...state.video, ...action.patch } };
+
+    case "setMusic":
+      return { ...state, music: action.music };
+
+    case "updateMusic":
+      return state.music
+        ? { ...state, music: { ...state.music, ...action.patch } }
+        : state;
 
     case "setShowHidden":
       return { ...state, showHiddenObjects: action.value };

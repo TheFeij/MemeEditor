@@ -38,6 +38,7 @@ export const DEFAULT_VIDEO_HARDWARE: VideoHardware = "software";
 
 export const VIDEO_PATH_RE = /\.(mp4|webm|ogv|ogg|mov|m4v|mkv|avi)$/i;
 export const IMAGE_PATH_RE = /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i;
+export const AUDIO_PATH_RE = /\.(mp3|wav|ogg|oga|m4a|aac|flac|opus|weba|webm|mp4)$/i;
 
 // Render the document at a higher internal resolution so text and vector shapes
 // stay crisp even when the base image is small.

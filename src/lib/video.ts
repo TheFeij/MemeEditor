@@ -7,6 +7,7 @@ import type {
   EditorObject,
   EditorState,
   MediaType,
+  MusicTrack,
   VideoCodec,
   VideoHardware,
   VideoResolution,
@@ -100,6 +101,19 @@ export function isVideoFile(file: File): boolean {
 
 export function isVideoMime(type: string): boolean {
   return VIDEO_MIME_RE.test(type || "");
+}
+
+// The editable length of a video project: the video's own duration, extended by
+// a music clip that runs past the end. Everything on the timeline (ruler,
+// scrubbing, object timing, export length) uses this instead of the raw video
+// duration so music is never trapped inside the original clip's length.
+export function timelineDuration(
+  videoDuration: number,
+  music: MusicTrack | null,
+): number {
+  const video = isFinite(videoDuration) && videoDuration > 0 ? videoDuration : 0;
+  const musicEnd = music && isFinite(music.end) ? Math.max(0, music.end) : 0;
+  return Math.max(video, musicEnd);
 }
 
 // Whether a timed object is visible at time `t`. Objects without a range are

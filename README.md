@@ -36,7 +36,9 @@
 - **Video memes** — open a video, edit it exactly like an image, and give every text,
   shape, sticker or brush stroke its own **start / end time** on a CapCut-style timeline
   (drag a bar to retime it, drag its edges to trim, and click the ruler to scrub).
-  Export to MP4 (keeping the original audio) via ffmpeg.
+  Add a **music track** on the timeline and trim it by resizing — the timeline grows to
+  fit longer songs (the video holds its last frame), and the original video audio can
+  be muted. Export to MP4 or WebM via ffmpeg.
 - **Image layers** — stack extra images (logos, stickers) on top of the base image, resize/rotate them, and crop them in place.
 - **Replace base image** — swap the underlying meme while keeping text, stickers and shapes in place.
 - **Text tool** — content, font, size, alignment, color and outline, with auto-fit and max-size options.

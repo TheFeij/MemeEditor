@@ -49,6 +49,7 @@ export const initialState: EditorState = {
   cropRect: null,
   imageCrop: null,
   videoCrop: null,
+  music: null,
   history: [],
   historyIndex: -1,
 };

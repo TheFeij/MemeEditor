@@ -6,6 +6,7 @@ import {
   formatTick,
   formatTime,
   isObjectActiveAt,
+  timelineDuration,
 } from "../lib/video";
 import {
   TIMELINE_SNAP_PX,
@@ -13,7 +14,7 @@ import {
   snapValue,
   timelineSnapTargets,
 } from "../lib/timeline";
-import type { EditorObject } from "../types";
+import type { EditorObject, MusicTrack } from "../types";
 
 type TimelineInteraction =
   | { kind: "scrub" }
@@ -24,6 +25,16 @@ type TimelineInteraction =
       width: number;
       origStart: number;
       origEnd: number;
+      viewDuration: number;
+    }
+  | {
+      kind: "musicMove" | "musicTrimL" | "musicTrimR";
+      startX: number;
+      width: number;
+      origStart: number;
+      origEnd: number;
+      origAudioStart: number;
+      viewDuration: number;
     };
 
 function clamp(v: number, min: number, max: number): number {
@@ -34,11 +45,34 @@ function round2(v: number): number {
   return Math.round(v * 100) / 100;
 }
 
+// The furthest timeline position the music can reach without running past the
+// end of the audio file.
+function musicMaxEnd(music: MusicTrack, audioStart: number): number {
+  if (!isFinite(music.duration) || music.duration <= 0) return Infinity;
+  return music.start + (music.duration - audioStart);
+}
+
 export function Timeline() {
-  const { state, dispatch, commit, seekTo, getPlayhead, togglePlay, toggleMute } = useEditor();
+  const {
+    state,
+    dispatch,
+    commit,
+    seekTo,
+    getPlayhead,
+    togglePlay,
+    toggleMute,
+    addMusicDialog,
+    removeMusic,
+  } = useEditor();
 
   const visible = state.started && state.mediaType === "video";
-  const duration = state.video.duration || 0;
+  // The timeline is as long as the video *or* the music, whichever ends later.
+  const effectiveDuration = timelineDuration(state.video.duration, state.music);
+  // Freeze the scale while a clip is being dragged. Otherwise trimming the
+  // music shorter would shrink the timeline mid-gesture and the clip would move
+  // away from the pointer.
+  const [frozenDuration, setFrozenDuration] = useState<number | null>(null);
+  const duration = frozenDuration ?? effectiveDuration;
   const interactionRef = useRef<TimelineInteraction | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
@@ -99,11 +133,34 @@ export function Timeline() {
     const target = e.target as HTMLElement;
     const clip = target.closest ? (target.closest(".tl-clip") as HTMLElement | null) : null;
     if (clip && rect.width > 0) {
+      const handle = target.closest(".tl-handle") as HTMLElement | null;
+      if (clip.dataset.music === "1") {
+        const music = state.music;
+        if (!music) return;
+        let kind: "musicMove" | "musicTrimL" | "musicTrimR" = "musicMove";
+        if (handle) kind = handle.classList.contains("tl-handle-l") ? "musicTrimL" : "musicTrimR";
+        interactionRef.current = {
+          kind,
+          startX: e.clientX,
+          width: rect.width,
+          origStart: music.start,
+          origEnd: music.end,
+          origAudioStart: music.audioStart,
+          viewDuration: duration,
+        };
+        setFrozenDuration(duration);
+        try {
+          body.setPointerCapture(e.pointerId);
+        } catch {
+          /* best effort */
+        }
+        e.preventDefault();
+        return;
+      }
       const id = clip.dataset.id;
       const obj = state.objects.find((o) => o.id === id);
       if (!obj) return;
       dispatch({ type: "selectObject", id: obj.id });
-      const handle = target.closest(".tl-handle") as HTMLElement | null;
       let kind: "moveTime" | "trimL" | "trimR" = "moveTime";
       if (handle) kind = handle.classList.contains("tl-handle-l") ? "trimL" : "trimR";
       interactionRef.current = {
@@ -113,7 +170,9 @@ export function Timeline() {
         width: rect.width,
         origStart: obj.tStart == null ? 0 : obj.tStart,
         origEnd: obj.tEnd == null ? duration : obj.tEnd,
+        viewDuration: duration,
       };
+      setFrozenDuration(duration);
       try {
         body.setPointerCapture(e.pointerId);
       } catch {
@@ -140,18 +199,60 @@ export function Timeline() {
       scrubFromClientX(e.clientX);
       return;
     }
+    if (it.width <= 0) return;
+    const vd = it.viewDuration;
+    if (vd <= 0) return;
+    const dT = ((e.clientX - it.startX) / it.width) * vd;
+    const minLen = Math.min(0.05, vd);
+    const threshold = (TIMELINE_SNAP_PX / it.width) * vd;
+
+    if (it.kind === "musicMove" || it.kind === "musicTrimL" || it.kind === "musicTrimR") {
+      const music = state.music;
+      if (!music) return;
+      // Music snaps to the timeline bounds and every object edge, but not to
+      // itself (that would fight every drag).
+      const targets = timelineSnapTargets(vd, state.objects, "");
+      let patch: Partial<MusicTrack> | null = null;
+      if (it.kind === "musicMove") {
+        const len = it.origEnd - it.origStart;
+        const snapped = snapMove(it.origStart + dT, len, targets, threshold);
+        const s = clamp(snapped.value, 0, Math.max(0, vd - len));
+        patch = { start: round2(s), end: round2(s + len) };
+        setSnapTime(snapped.guide);
+        seekTo(s);
+      } else if (it.kind === "musicTrimL") {
+        // Dragging the left edge trims into (or back out of) the song, so the
+        // source offset moves with the clip start.
+        const minStart = Math.max(0, it.origStart - it.origAudioStart);
+        const snapped = snapValue(it.origStart + dT, targets, threshold);
+        const s = clamp(snapped.value, minStart, it.origEnd - minLen);
+        const audioStart = clamp(it.origAudioStart + (s - it.origStart), 0, music.duration);
+        patch = { start: round2(s), audioStart: round2(audioStart) };
+        setSnapTime(snapped.guide);
+        seekTo(s);
+      } else {
+        const cap = Math.min(vd, musicMaxEnd(music, it.origAudioStart));
+        const snapped = snapValue(it.origEnd + dT, targets, threshold);
+        const v = clamp(snapped.value, it.origStart + minLen, Math.max(it.origStart + minLen, cap));
+        patch = { end: round2(v) };
+        setSnapTime(snapped.guide);
+        seekTo(v);
+      }
+      if (patch) dispatch({ type: "updateMusic", patch });
+      return;
+    }
+
+    if (!("id" in it)) return;
     const obj = state.objects.find((o) => o.id === it.id) as EditorObject | undefined;
-    if (!obj || it.width <= 0 || duration <= 0) return;
-    const dT = ((e.clientX - it.startX) / it.width) * duration;
-    const minLen = Math.min(0.05, duration);
-    const threshold = (TIMELINE_SNAP_PX / it.width) * duration;
-    const targets = timelineSnapTargets(duration, state.objects, it.id);
+    if (!obj) return;
+    const targets = timelineSnapTargets(vd, state.objects, it.id);
+    if (state.music) targets.push(state.music.start, state.music.end);
 
     let patch: Partial<EditorObject> | null = null;
     if (it.kind === "moveTime") {
       const len = it.origEnd - it.origStart;
       const snapped = snapMove(it.origStart + dT, len, targets, threshold);
-      const s = clamp(snapped.value, 0, Math.max(0, duration - len));
+      const s = clamp(snapped.value, 0, Math.max(0, vd - len));
       patch = { tStart: round2(s), tEnd: round2(s + len) };
       setSnapTime(snapped.guide);
       seekTo(s);
@@ -163,7 +264,7 @@ export function Timeline() {
       seekTo(s);
     } else {
       const snapped = snapValue(it.origEnd + dT, targets, threshold);
-      const v = clamp(snapped.value, it.origStart + minLen, duration);
+      const v = clamp(snapped.value, it.origStart + minLen, vd);
       patch = { tEnd: round2(v) };
       setSnapTime(snapped.guide);
       seekTo(v);
@@ -183,10 +284,14 @@ export function Timeline() {
       /* ignore */
     }
     if (it.kind !== "scrub") commit();
+    setFrozenDuration(null);
     e.preventDefault();
   };
 
   const playheadLabel = formatTime(getPlayhead());
+  const music = state.music;
+  const musicStart = music ? clamp(music.start, 0, duration) : 0;
+  const musicEnd = music ? clamp(music.end, 0, duration) : 0;
 
   return (
     <section className={`timeline${visible ? "" : " hidden"}`} id="timeline">
@@ -211,11 +316,31 @@ export function Timeline() {
           id="tl-mute"
           className="tl-btn"
           type="button"
-          title="Mute / unmute"
+          title={state.video.muted ? "Original video audio is off" : "Original video audio is on"}
           onClick={toggleMute}
         >
           {state.video.muted ? "🔇" : "🔊"}
         </button>
+        <button
+          id="tl-music"
+          className="tl-btn"
+          type="button"
+          title={music ? "Replace music" : "Add music"}
+          onClick={() => void addMusicDialog()}
+        >
+          🎵
+        </button>
+        {music && (
+          <button
+            id="tl-music-remove"
+            className="tl-btn"
+            type="button"
+            title="Remove music"
+            onClick={removeMusic}
+          >
+            ✕
+          </button>
+        )}
         <label className="tl-check" title="Show objects that are not active at the playhead">
           <input
             type="checkbox"
@@ -247,6 +372,24 @@ export function Timeline() {
             ))}
           </div>
           <div className="tl-lanes" id="tl-lanes" ref={lanesRef}>
+            {music && (
+              <div className="tl-lane tl-lane-music">
+                <div
+                  className="tl-clip clip-music"
+                  data-music="1"
+                  style={{
+                    left: `${duration > 0 ? (musicStart / duration) * 100 : 0}%`,
+                    width: `${duration > 0 ? (Math.max(0, musicEnd - musicStart) / duration) * 100 : 0}%`,
+                  }}
+                >
+                  <div className="tl-handle tl-handle-l" />
+                  <div className="tl-clip-body">
+                    <span className="tl-clip-label">♪ {music.name}</span>
+                  </div>
+                  <div className="tl-handle tl-handle-r" />
+                </div>
+              </div>
+            )}
             {state.objects
               .slice()
               .reverse()
