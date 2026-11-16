@@ -1,6 +1,12 @@
-import { MAX_HISTORY, COMMIT_COALESCE_MS, DEFAULT_VIDEO_FPS } from "../lib/constants";
+import {
+  MAX_HISTORY,
+  COMMIT_COALESCE_MS,
+  DEFAULT_LINE_SPACING,
+  DEFAULT_VIDEO_FPS,
+} from "../lib/constants";
 import { cloneObject } from "../lib/object";
 import type {
+  BackgroundStyle,
   BrushSettings,
   DocSnapshot,
   EditorObject,
@@ -25,6 +31,7 @@ export type Action =
     }
   | { type: "setPadding"; padding: Partial<Padding> }
   | { type: "setBackground"; color: string }
+  | { type: "setBackgroundStyle"; patch: Partial<BackgroundStyle> }
   | { type: "setActiveTool"; tool: Tool }
   | { type: "setZoom"; zoom: number }
   | { type: "setStartCanvas"; patch: Partial<EditorState["startCanvas"]> }
@@ -78,6 +85,7 @@ export type Action =
       type: "loadPreferences";
       prefs: {
         background?: string;
+        backgroundStyle?: Partial<BackgroundStyle>;
         padding?: Partial<Padding>;
         brush?: Partial<EditorState["brush"]>;
         startCanvas?: Partial<EditorState["startCanvas"]>;
@@ -96,6 +104,7 @@ function snapshot(state: EditorState): DocSnapshot {
     baseImage: { ...state.baseImage },
     padding: { ...state.padding },
     background: state.background,
+    backgroundStyle: { ...state.backgroundStyle },
     objects: state.objects.map(cloneObject),
     selectedObjectId: state.selectedObjectId,
     brush: { ...state.brush },
@@ -133,6 +142,7 @@ function applySnapshot(state: EditorState, snap: DocSnapshot, index: number): Ed
     baseImage: { ...snap.baseImage },
     padding: { ...snap.padding },
     background: snap.background,
+    backgroundStyle: { ...snap.backgroundStyle },
     objects: snap.objects.map(cloneObject),
     selectedObjectId: snap.selectedObjectId,
     brush: { ...snap.brush },
@@ -269,6 +279,12 @@ export function reducer(state: EditorState, action: Action): EditorState {
       return next;
     }
 
+    case "setBackgroundStyle":
+      return {
+        ...state,
+        backgroundStyle: { ...state.backgroundStyle, ...action.patch },
+      };
+
     case "setActiveTool":
       return { ...state, activeTool: action.tool };
 
@@ -376,13 +392,22 @@ export function reducer(state: EditorState, action: Action): EditorState {
 
     case "loadPreferences": {
       const p = action.prefs;
+      const textPresets = (p.textPresets ?? state.textPresets).map((preset) => ({
+        ...preset,
+        // Older saved preferences predate line spacing; keep their original
+        // appearance by filling in the historical default.
+        lineSpacing: preset.lineSpacing ?? DEFAULT_LINE_SPACING,
+      }));
       return {
         ...state,
         background: p.background ?? state.background,
+        backgroundStyle: p.backgroundStyle
+          ? { ...state.backgroundStyle, ...p.backgroundStyle }
+          : state.backgroundStyle,
         padding: p.padding ? { ...state.padding, ...p.padding } : state.padding,
         brush: (p.brush ? { ...state.brush, ...p.brush } : state.brush) as BrushSettings,
         startCanvas: p.startCanvas ? { ...state.startCanvas, ...p.startCanvas } : state.startCanvas,
-        textPresets: p.textPresets ?? state.textPresets,
+        textPresets,
         defaultPresetId: p.defaultPresetId ?? state.defaultPresetId,
         logoDataURL: p.logoDataURL ?? state.logoDataURL,
         video: p.videoExport ? { ...state.video, ...p.videoExport } : state.video,

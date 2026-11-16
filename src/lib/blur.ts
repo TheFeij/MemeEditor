@@ -1,6 +1,6 @@
 import { DEFAULT_BLUR_RADIUS } from "./constants";
 import { getObjectBounds, objectPath } from "./object";
-import type { EditorObject } from "../types";
+import type { BackgroundStyle, EditorObject } from "../types";
 
 // Background-blur fill: samples whatever is already drawn beneath an object,
 // blurs that region, and paints it back inside the object's silhouette.
@@ -62,11 +62,14 @@ export function pruneBlurCache(objects: EditorObject[]): void {
 // only on real changes (so cached blurs are reused on selection/zoom redraws).
 export function contentSignature(state: {
   background: string;
+  backgroundStyle: BackgroundStyle;
   padding: { top: number; right: number; bottom: number; left: number };
   baseImage: { width: number; height: number };
   objects: EditorObject[];
 }): string {
   const pad = state.padding;
+  const bgStyle = state.backgroundStyle;
+  const style = `${bgStyle.mode},${bgStyle.pattern},${bgStyle.lineColor},${bgStyle.lineOpacity},${bgStyle.spacing},${bgStyle.lineWidth}`;
   const objs = state.objects
     .map((o) =>
       [
@@ -89,7 +92,7 @@ export function contentSignature(state: {
       ].join(","),
     )
     .join(";");
-  return `${state.background}|${pad.top},${pad.right},${pad.bottom},${pad.left}|${state.baseImage.width}x${state.baseImage.height}|${objs}`;
+  return `${state.background}|${style}|${pad.top},${pad.right},${pad.bottom},${pad.left}|${state.baseImage.width}x${state.baseImage.height}|${objs}`;
 }
 
 function deviceScaleOf(ctx: CanvasRenderingContext2D): number {

@@ -6,6 +6,29 @@ export type Align = "left" | "center" | "right";
 export type Direction = "rtl" | "ltr";
 export type ShapeMode = "fill" | "blur";
 export type BrushMode = "draw" | "cover" | "blur";
+export type BackgroundMode = "solid" | "lines";
+export type BackgroundPattern =
+  | "diagonal"
+  | "grid"
+  | "crosshatch"
+  | "triangles"
+  | "hexagons"
+  | "isometric"
+  | "waves"
+  | "scales"
+  | "rings"
+  | "truchet";
+
+// Decorative pattern drawn over the background colour. Only the `lines` mode
+// paints geometry; `solid` leaves the flat colour untouched.
+export interface BackgroundStyle {
+  mode: BackgroundMode;
+  pattern: BackgroundPattern;
+  lineColor: string;
+  lineOpacity: number;
+  spacing: number;
+  lineWidth: number;
+}
 
 // Video export knobs. `resolution` scales the composed frame (never upscales);
 // `codec` selects the encoder family and container; `hardware` picks a GPU
@@ -40,6 +63,8 @@ export interface TextPreset {
   name: string;
   fontFamily: string;
   maxFontSize: number;
+  // Multiplier applied to the font size to get the distance between lines.
+  lineSpacing: number;
   align: Align;
   color: string;
   outlineColor: string;
@@ -65,6 +90,8 @@ export interface EditorObject {
   fontFamily?: string;
   fontSize?: number;
   maxFontSize?: number;
+  // Multiplier applied to the font size to get the distance between lines.
+  lineSpacing?: number;
   autoFit?: boolean;
   color?: string;
   outlineColor?: string;
@@ -103,6 +130,7 @@ export interface DocSnapshot {
   baseImage: BaseImage;
   padding: Padding;
   background: string;
+  backgroundStyle: BackgroundStyle;
   objects: EditorObject[];
   selectedObjectId: string | null;
   brush: BrushSettings;
@@ -121,6 +149,7 @@ export interface EditorState {
   baseImage: BaseImage;
   padding: Padding;
   background: string;
+  backgroundStyle: BackgroundStyle;
   objects: EditorObject[];
   selectedObjectId: string | null;
   activeTool: Tool;

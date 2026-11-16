@@ -1,4 +1,4 @@
-import type { VideoCodec, VideoHardware, VideoResolution } from "../types";
+import type { BackgroundStyle, VideoCodec, VideoHardware, VideoResolution } from "../types";
 
 export const DEFAULT_FONT = "Zain Bold";
 export const FONT_FALLBACK = '"Zain", "Vazirmatn", system-ui, sans-serif';
@@ -7,6 +7,18 @@ export const DEFAULT_CANVAS = { width: 800, height: 600 };
 
 // Default canvas background.
 export const DEFAULT_BACKGROUND = "#000000";
+
+// Subtle diagonal lines over the flat background colour. Kept faint so the
+// pattern adds texture without competing with the meme.
+export const DEFAULT_BACKGROUND_STYLE: BackgroundStyle = {
+  mode: "solid",
+  pattern: "diagonal",
+  lineColor: "#ffffff",
+  lineOpacity: 0.15,
+  spacing: 48,
+  lineWidth: 1,
+};
+
 export const MAX_HISTORY = 120;
 // Consecutive history commits that share a key and arrive within this window
 // (e.g. typing or dragging a slider) collapse into one undo step.
@@ -14,6 +26,9 @@ export const COMMIT_COALESCE_MS = 800;
 export const PREFERENCES_VERSION = 1;
 
 export const DEFAULT_TEXT_DIRECTION = "rtl";
+// Must match the line height the text renderer used before line spacing was
+// configurable, so existing documents keep their appearance.
+export const DEFAULT_LINE_SPACING = 1.15;
 export const DEFAULT_RECT_RADIUS = 12;
 export const DEFAULT_BLUR_RADIUS = 16;
 export const DEFAULT_VIDEO_FPS = 30;

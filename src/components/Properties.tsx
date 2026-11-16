@@ -3,42 +3,13 @@ import { useEditor } from "../state/EditorContext";
 import { useToast } from "./Toasts";
 import { ColorField } from "./ColorField";
 import { NumberField } from "./NumberField";
+import { Range } from "./Range";
 import { RichTextField } from "./RichTextField";
 import { Select } from "./Select";
 import { getSelectedObject } from "../lib/render";
 import { textPresetPatch, uid, round2 } from "../lib/object";
-import { DEFAULT_FONT, DEFAULT_TEXT_DIRECTION } from "../lib/constants";
+import { DEFAULT_FONT, DEFAULT_LINE_SPACING, DEFAULT_TEXT_DIRECTION } from "../lib/constants";
 import type { Align, Direction, EditorObject, TextPreset } from "../types";
-
-function Range({
-  id,
-  min,
-  max,
-  step = 1,
-  value,
-  onChange,
-}: {
-  id: string;
-  min: number;
-  max: number;
-  step?: number;
-  value: number;
-  onChange: (v: number) => void;
-}) {
-  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
-  return (
-    <input
-      id={id}
-      type="range"
-      min={min}
-      max={max}
-      step={step}
-      value={value}
-      style={{ ["--range-progress" as string]: `${pct}%` }}
-      onChange={(e) => onChange(parseFloat(e.target.value))}
-    />
-  );
-}
 
 function commitKey(obj: EditorObject, patch: Partial<EditorObject>): string {
   return `${obj.id}:${Object.keys(patch).sort().join(",")}`;
@@ -141,6 +112,19 @@ function TextProperties({ obj }: { obj: EditorObject }) {
         </div>
       )}
       <div className="field">
+        <label>
+          Line spacing <span>{(obj.lineSpacing ?? DEFAULT_LINE_SPACING).toFixed(2)}</span>
+        </label>
+        <Range
+          id="text-line-spacing"
+          min={0.8}
+          max={3}
+          step={0.05}
+          value={obj.lineSpacing ?? DEFAULT_LINE_SPACING}
+          onChange={(v) => set({ lineSpacing: round2(v) })}
+        />
+      </div>
+      <div className="field">
         <label>Alignment</label>
         <div className="seg" id="text-align">
           {(["left", "center", "right"] as Align[]).map((a) => (
@@ -225,6 +209,7 @@ function styleFromObject(obj: EditorObject): Omit<TextPreset, "id" | "name"> {
   return {
     fontFamily: obj.fontFamily ?? DEFAULT_FONT,
     maxFontSize: obj.maxFontSize || obj.fontSize || 48,
+    lineSpacing: obj.lineSpacing ?? DEFAULT_LINE_SPACING,
     align: obj.align ?? "center",
     direction: obj.direction ?? DEFAULT_TEXT_DIRECTION,
     color: obj.color ?? "#ffffff",

@@ -14,7 +14,7 @@ import { reducer, type Action } from "./reducer";
 import { useToast } from "../components/Toasts";
 import { loadImageElement, blobToDataURL } from "../lib/image";
 import { installFonts } from "../lib/fonts";
-import { renderToPNG, getSelectedObject } from "../lib/render";
+import { renderToPNG, getSelectedObject, renderBackgroundPatternPng } from "../lib/render";
 import { computeDocumentSize } from "../lib/document";
 import { getObjectBounds, uid } from "../lib/object";
 import {
@@ -33,6 +33,7 @@ import type { EditorObject, EditorState, Tool, VideoExportLayer } from "../types
 interface Preferences {
   version: number;
   background: string;
+  backgroundStyle: EditorState["backgroundStyle"];
   padding: EditorState["padding"];
   brush: EditorState["brush"];
   startCanvas: EditorState["startCanvas"];
@@ -111,6 +112,7 @@ function collectPreferences(state: EditorState): Preferences {
   return {
     version: PREFERENCES_VERSION,
     background: state.background,
+    backgroundStyle: state.backgroundStyle,
     padding: state.padding,
     brush: state.brush,
     startCanvas: state.startCanvas,
@@ -216,6 +218,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
           type: "loadPreferences",
           prefs: {
             background: prefs.background,
+            backgroundStyle: prefs.backgroundStyle,
             padding: prefs.padding,
             brush: prefs.brush,
             startCanvas: prefs.startCanvas,
@@ -237,6 +240,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     () => JSON.stringify(collectPreferences(state)),
     [
       state.background,
+      state.backgroundStyle,
       state.padding,
       state.brush,
       state.startCanvas,
@@ -712,6 +716,12 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     }
 
     const layers: VideoExportLayer[] = [];
+    // The line pattern shows through the padding, on top of ffmpeg's flat
+    // background fill and beneath every object and the video frame itself.
+    const backgroundPattern = renderBackgroundPatternPng(current);
+    if (backgroundPattern) {
+      layers.push({ image: backgroundPattern, start: 0, end: duration, blur: 0 });
+    }
     for (const obj of current.objects) {
       const start = obj.tStart == null ? 0 : obj.tStart;
       let end = obj.tEnd == null ? duration : obj.tEnd;

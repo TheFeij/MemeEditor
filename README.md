@@ -42,14 +42,14 @@
 - **Text tool** — content, font, size, alignment, color and outline, with auto-fit and max-size options.
 - **RTL / LTR direction** — right-to-left is the default writing direction (great for Farsi/Arabic with embedded English).
 - **Custom fonts** — drop your own `.ttf` / `.otf` / `.woff` / `.woff2` files into the `fonts` folder shipped with the app.
-- **Text presets** — save, apply, rename and delete reusable text styles, and set a default for all new text.
+- **Text presets** — save, apply, rename and delete reusable text styles (including line spacing), and set a default for all new text.
 - **Shapes** — rectangles (with corner radius) and ellipses that can be painted as a solid color or as a live **background blur**.
 - **Brush** — freehand draw, cover/remove, or blur the background.
 - **Rotate** — rotate any object with its rotate handle (hold `Shift` for 15° steps) or the rotation controls.
 - **Eyedropper** — every color picker has an eyedropper button to sample a color straight from the canvas.
 - **Logo quick-access** — save a logo once and drop it onto the canvas with one click.
 - **Padding** — percentage-based padding per side, with Classic and Modern presets.
-- **Background** — any custom color, applied to the canvas and used as the default shape fill.
+- **Background** — any custom color, applied to the canvas and used as the default shape fill, with an optional geometric pattern (diagonal, grid, crosshatch, triangles, hexagons, isometric cubes, waves, scales, rings or maze) and its own line color, spacing, thickness and opacity.
 - **Arrange** — bring forward / send backward, and delete the selected object.
 - **Undo / redo** — a full history of your edits.
 - **Themed UI** — custom dropdowns and a built-in color picker designed for the app.

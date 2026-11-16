@@ -1,7 +1,9 @@
 import { useEditor } from "../state/EditorContext";
 import { ColorField } from "./ColorField";
 import { NumberField } from "./NumberField";
-import type { Tool } from "../types";
+import { Range } from "./Range";
+import { Select } from "./Select";
+import type { BackgroundPattern, BackgroundStyle, Tool } from "../types";
 
 const TOOLS: { tool: Tool; icon: string; label: string; title: string }[] = [
   { tool: "select", icon: "▲", label: "Select", title: "Select (V)" },
@@ -20,6 +22,7 @@ function clampPadding(v: number): number {
 
 export function Toolbar() {
   const { state, dispatch, addImageLayerDialog, commit } = useEditor();
+  const bgStyle = state.backgroundStyle;
 
   const setPad = (key: keyof typeof state.padding, value: number) => {
     dispatch({ type: "setPadding", padding: { [key]: clampPadding(value) } });
@@ -34,6 +37,11 @@ export function Toolbar() {
   const setBackground = (color: string) => {
     dispatch({ type: "setBackground", color });
     commit("background");
+  };
+
+  const setBackgroundStyle = (patch: Partial<BackgroundStyle>, key: string) => {
+    dispatch({ type: "setBackgroundStyle", patch });
+    commit(`background:${key}`);
   };
 
   return (
@@ -146,6 +154,27 @@ export function Toolbar() {
 
       <section className="tool-section">
         <h3 className="section-title">Background</h3>
+        <div className="field">
+          <label>Mode</label>
+          <div className="seg" id="bg-mode">
+            {(
+              [
+                ["solid", "Solid"],
+                ["lines", "Lines"],
+              ] as const
+            ).map(([mode, label]) => (
+              <button
+                key={mode}
+                type="button"
+                className={bgStyle.mode === mode ? "active" : ""}
+                data-mode={mode}
+                onClick={() => setBackgroundStyle({ mode }, "mode")}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="row gap">
           <button
             id="bg-white"
@@ -174,6 +203,77 @@ export function Toolbar() {
             onChange={(v) => setBackground(v)}
           />
         </div>
+        {bgStyle.mode === "lines" && (
+          <>
+            <div className="field">
+              <label>Pattern</label>
+              <Select
+                id="bg-pattern"
+                value={bgStyle.pattern}
+                options={[
+                  { value: "diagonal", label: "Diagonal" },
+                  { value: "grid", label: "Grid" },
+                  { value: "crosshatch", label: "Crosshatch" },
+                  { value: "triangles", label: "Triangles" },
+                  { value: "hexagons", label: "Hexagons" },
+                  { value: "isometric", label: "Isometric" },
+                  { value: "waves", label: "Waves" },
+                  { value: "scales", label: "Scales" },
+                  { value: "rings", label: "Rings" },
+                  { value: "truchet", label: "Maze" },
+                ]}
+                onChange={(v) =>
+                  setBackgroundStyle({ pattern: v as BackgroundPattern }, "pattern")
+                }
+              />
+            </div>
+            <div className="field">
+              <label>Line color</label>
+              <ColorField
+                id="bg-line-color"
+                value={bgStyle.lineColor}
+                onChange={(v) => setBackgroundStyle({ lineColor: v }, "lineColor")}
+              />
+            </div>
+            <div className="field">
+              <label>
+                Spacing <span>{bgStyle.spacing}</span>
+              </label>
+              <Range
+                id="bg-line-spacing"
+                min={12}
+                max={160}
+                value={bgStyle.spacing}
+                onChange={(v) => setBackgroundStyle({ spacing: Math.round(v) }, "spacing")}
+              />
+            </div>
+            <div className="field">
+              <label>
+                Thickness <span>{Number(bgStyle.lineWidth.toFixed(1))}</span>
+              </label>
+              <Range
+                id="bg-line-width"
+                min={0.5}
+                max={6}
+                step={0.5}
+                value={bgStyle.lineWidth}
+                onChange={(v) => setBackgroundStyle({ lineWidth: v }, "lineWidth")}
+              />
+            </div>
+            <div className="field">
+              <label>
+                Opacity <span>{Math.round(bgStyle.lineOpacity * 100)}%</span>
+              </label>
+              <Range
+                id="bg-line-opacity"
+                min={0}
+                max={100}
+                value={Math.round(bgStyle.lineOpacity * 100)}
+                onChange={(v) => setBackgroundStyle({ lineOpacity: v / 100 }, "opacity")}
+              />
+            </div>
+          </>
+        )}
       </section>
     </aside>
   );

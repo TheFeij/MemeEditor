@@ -1,5 +1,6 @@
 import {
   DEFAULT_BACKGROUND,
+  DEFAULT_BACKGROUND_STYLE,
   DEFAULT_BLUR_RADIUS,
   DEFAULT_CANVAS,
   DEFAULT_VIDEO_CODEC,
@@ -15,6 +16,7 @@ export const initialState: EditorState = {
   baseImage: { source: null, width: 0, height: 0 },
   padding: { top: 0, right: 0, bottom: 0, left: 0 },
   background: DEFAULT_BACKGROUND,
+  backgroundStyle: { ...DEFAULT_BACKGROUND_STYLE },
   objects: [],
   selectedObjectId: null,
   activeTool: "select",

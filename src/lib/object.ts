@@ -1,5 +1,6 @@
 import {
   DEFAULT_FONT,
+  DEFAULT_LINE_SPACING,
   DEFAULT_RECT_RADIUS,
   DEFAULT_TEXT_DIRECTION,
   FONT_FALLBACK,
@@ -124,6 +125,7 @@ export function getTextMetrics(obj: EditorObject, docWidth: number): TextMetrics
     obj.fontFamily,
     obj.fontSize,
     obj.maxFontSize,
+    obj.lineSpacing,
     obj.autoFit ? 1 : 0,
     Math.round(docWidth),
   ].join("\u0000");
@@ -132,7 +134,8 @@ export function getTextMetrics(obj: EditorObject, docWidth: number): TextMetrics
 
   const ctx = getMeasureCtx();
   const fontSize = getEffectiveFontSize(obj, docWidth);
-  const lineHeight = fontSize * 1.15;
+  const lineSpacing = Math.max(0.1, obj.lineSpacing ?? DEFAULT_LINE_SPACING);
+  const lineHeight = fontSize * lineSpacing;
   const lines = (obj.text || " ").split("\n");
   ctx.save();
   ctx.font = fontSize + "px " + fontStack(obj.fontFamily);
@@ -420,6 +423,7 @@ export function textPresetPatch(preset: TextPreset): Partial<EditorObject> {
     fontFamily: preset.fontFamily,
     maxFontSize: preset.maxFontSize,
     fontSize: preset.maxFontSize,
+    lineSpacing: preset.lineSpacing ?? DEFAULT_LINE_SPACING,
     autoFit: true,
     align: preset.align,
     color: preset.color,
@@ -449,6 +453,7 @@ export function createTextObject(
     fontFamily: DEFAULT_FONT,
     fontSize: 48,
     maxFontSize: 24,
+    lineSpacing: DEFAULT_LINE_SPACING,
     autoFit: false,
     color: "#ffffff",
     outlineColor: "#000000",
